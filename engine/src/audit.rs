@@ -300,6 +300,25 @@ impl AuditLog {
     pub fn total_records(&self) -> u64 {
         self.state.lock().unwrap().last_sequence
     }
+
+    pub fn read_all_records(&self) -> Result<Vec<AuditRecord>, AuditError> {
+        if !self.file_path.exists() {
+            return Ok(Vec::new());
+        }
+        let file = File::open(&self.file_path)?;
+        let reader = BufReader::new(file);
+        let mut records = Vec::new();
+        for line_res in reader.lines() {
+            let line = line_res?;
+            let trimmed = line.trim();
+            if trimmed.is_empty() {
+                continue;
+            }
+            let rec: AuditRecord = serde_json::from_str(trimmed)?;
+            records.push(rec);
+        }
+        Ok(records)
+    }
 }
 
 /// Computes the deterministic SHA-256 hash for an audit record.

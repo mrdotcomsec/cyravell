@@ -100,7 +100,12 @@ We classify potential threat actors into the following tiers:
 ### 5.1 Terminal & Shell Commands
 - **Threat:** AI agent executes destructive or exfiltrating shell commands (`rm -rf`, `curl ... | bash`, `nc -e`, `printenv > exfil`).
 - **Phase 2.1 Status:** Implemented deterministic, explainable static command security analysis pipeline with shell operator and pipeline awareness (`CommandAnalyzer`). Recognizes 7 threat categories: destructive filesystem operations, privilege escalation, credential access, remote code execution pipelines, persistence, network exfiltration, and encoded execution.
-- **Phase 2.1 Limitation:** Static analysis and classification only. Does not intercept terminal pseudo-terminals (PTYs), execute approval gates, or claim OS-level blocking (planned for Phase 2.2/2.3).
+- **Phase 2.2 Status:** Implemented controlled terminal pre-execution interception foundation (`ExecutionGate` and `ControlledShell`). Captures commands before shell dispatch, evaluates policy via IPC, and enforces decisions:
+  - `ALLOW_AND_MONITOR` -> Dispatched to execution backend.
+  - `ALERT_AND_CONFIRM` -> Held undispatched with outcome `PENDING_APPROVAL` (Phase 2.3 deferred).
+  - `BLOCK_AND_ALERT` -> Dispatched prevented with outcome `BLOCKED_BY_POLICY`.
+  - Engine failure / socket down -> Prevented with outcome `FAILED_CLOSED`.
+- **Phase 2.2 Boundary & Limitation:** Interception is active for sessions run under the controlled shell (`cyravell-engine shell` or VS Code `Cyravell Protected Terminal`). Commands entered into ordinary uninstrumented terminal sessions run directly and bypass the pre-execution gate. Interactive user approval dialogs and bypass testing are deferred to Phase 2.3 and 2.4.
 - **Classification vs Maliciousness:** Command risk classification reflects potential operational impact, not definitive proof of malicious intent. Unvetted or obfuscated commands may be flagged as high severity even if invoked by a developer in a test setting.
 
 ### 5.2 Local IPC Exposure & Message Poisoning

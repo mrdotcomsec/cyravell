@@ -144,6 +144,35 @@ export class StatusViewProvider implements vscode.TreeDataProvider<StatusItem> {
       )
     );
 
+    // Terminal Interception Boundary
+    const allTerminals = vscode.window.terminals || [];
+    const protectedCount = allTerminals.filter((t) =>
+      t.name.includes('Cyravell Protected Terminal')
+    ).length;
+    const ordinaryCount = allTerminals.length - protectedCount;
+
+    items.push(
+      new StatusItem(
+        'Controlled Terminal Path',
+        protectedCount > 0 ? `${protectedCount} Protected Active` : 'Available (Opt-In)',
+        vscode.TreeItemCollapsibleState.None,
+        protectedCount > 0 ? 'shield' : 'terminal',
+        'Controlled terminal sessions intercept and gate commands before execution dispatch.'
+      )
+    );
+
+    if (ordinaryCount > 0) {
+      items.push(
+        new StatusItem(
+          'Ordinary Terminals',
+          `${ordinaryCount} Active (UNPROTECTED)`,
+          vscode.TreeItemCollapsibleState.None,
+          'warning',
+          'NOTICE: Ordinary terminal sessions bypass the Cyravell pre-execution gate. Use Cyravell Protected Terminal for active interception.'
+        )
+      );
+    }
+
     return Promise.resolve(items);
   }
 }

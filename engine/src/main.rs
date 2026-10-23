@@ -64,6 +64,42 @@ enum Commands {
         #[arg(short, long)]
         working_dir: Option<String>,
     },
+    /// Launch a Cyravell controlled terminal session with active pre-execution interception
+    Shell {
+        /// Execute single command and exit (like bash -c)
+        #[arg(short = 'c', long)]
+        command: Option<String>,
+
+        /// Path to underlying shell (default: /bin/bash)
+        #[arg(long)]
+        backend_shell: Option<String>,
+
+        /// Whether to fail closed when the security engine is offline
+        #[arg(long, default_value_t = true)]
+        fail_closed: bool,
+    },
+    /// Execute a command through the Cyravell pre-execution gate
+    Exec {
+        #[arg(short, long)]
+        command: String,
+
+        #[arg(short, long)]
+        working_dir: Option<String>,
+
+        #[arg(long, default_value_t = true)]
+        fail_closed: bool,
+    },
+    /// Evaluate execution gate decision for a command without dispatching
+    GateEval {
+        #[arg(short, long)]
+        command: String,
+
+        #[arg(short, long)]
+        working_dir: Option<String>,
+
+        #[arg(long, default_value_t = true)]
+        fail_closed: bool,
+    },
 }
 
 fn default_socket_path() -> PathBuf {
@@ -261,6 +297,118 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             println!("Evidence:");
             for ev in &assessment.evidence {
                 println!("  - {}", ev);
+            }
+        }
+
+        Commands::Shell {
+            command,
+            backend_shell,
+            fail_closed,
+        } => {
+            let backend =
+                std::sync::Arc::new(cyravell_engine::OsExecutionBackend::new(backend_shell));
+            let ipc_client = Some(std::sync::Arc::new(cyravell_engine::GateEngineClient::new(
+                &socket_path,
+            )));
+            let in_process_policy = if !fail_closed {
+                Some(cyravell_engine::PolicyEngine::new())
+            } else {
+                None
+            };
+            let audit_path = data_dir.join("audit.log");
+            let in_process_audit = cyravell_engine::AuditLog::open(&audit_path)
+                .ok()
+                .map(std::sync::Arc::new);
+
+            let gate = std::sync::Arc::new(cyravell_engine::ExecutionGate::new(
+                backend,
+                ipc_client,
+                in_process_policy,
+                in_process_audit,
+                fail_closed,
+            ));
+
+            let shell = cyravell_engine::ControlledShell::new(gate, None);
+
+            if let Some(cmd) = command {
+                let code = shell.run_command(&cmd);
+                std::process::exit(code);
+            } else {
+                shell.run_interactive()?;
+            }
+        }
+
+        Commands::Exec {
+            command,
+            working_dir,
+            fail_closed,
+        } => {
+            let backend = std::sync::Arc::new(cyravell_engine::OsExecutionBackend::new(None));
+            let ipc_client = Some(std::sync::Arc::new(cyravell_engine::GateEngineClient::new(
+                &socket_path,
+            )));
+            let in_process_policy = if !fail_closed {
+                Some(cyravell_engine::PolicyEngine::new())
+            } else {
+                None
+            };
+            let audit_path = data_dir.join("audit.log");
+            let in_process_audit = cyravell_engine::AuditLog::open(&audit_path)
+                .ok()
+                .map(std::sync::Arc::new);
+
+            let gate = std::sync::Arc::new(cyravell_engine::ExecutionGate::new(
+                backend,
+                ipc_client,
+                in_process_policy,
+                in_process_audit,
+                fail_closed,
+            ));
+
+            let dir = working_dir.map(std::path::PathBuf::from);
+            let shell = cyravell_engine::ControlledShell::new(gate, dir);
+            let code = shell.run_command(&command);
+            std::process::exit(code);
+        }
+
+        Commands::GateEval {
+            command,
+            working_dir,
+            fail_closed,
+        } => {
+            let backend = std::sync::Arc::new(cyravell_engine::MockExecutionBackend::new());
+            let ipc_client = Some(std::sync::Arc::new(cyravell_engine::GateEngineClient::new(
+                &socket_path,
+            )));
+            let in_process_policy = if !fail_closed {
+                Some(cyravell_engine::PolicyEngine::new())
+            } else {
+                None
+            };
+            let gate = cyravell_engine::ExecutionGate::new(
+                backend,
+                ipc_client,
+                in_process_policy,
+                None,
+                fail_closed,
+            );
+
+            let dir = working_dir.as_ref().map(std::path::Path::new);
+            let eval = gate.evaluate(&command, dir);
+
+            println!("Gate Decision:     {:?}", eval.decision);
+            println!("Execution Outcome: {:?}", eval.outcome);
+            println!("Allow Dispatch:    {}", eval.allow_dispatch);
+            println!("Severity:          {:?}", eval.risk_assessment.severity);
+            println!("Primary Rule:      {}", eval.risk_assessment.rule_id);
+            println!(
+                "Matched Rules:     {:?}",
+                eval.risk_assessment.matched_rules
+            );
+            println!("Completeness:      {:?}", eval.analysis_completeness);
+            println!("Reason:            {}", eval.reason);
+            if let Some(ref impact) = eval.risk_assessment.potential_impact {
+                println!("Potential Impact:  {}", impact);
             }
         }
     }

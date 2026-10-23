@@ -34,6 +34,17 @@ export interface CommandAnalysisDetails {
   analysis_notes: string[];
 }
 
+export interface GateEvaluateResult {
+  decision: 'ALLOW' | 'REQUIRE_APPROVAL' | 'BLOCK' | 'ANALYSIS_FAILED';
+  outcome: 'DISPATCHED' | 'BLOCKED_BY_POLICY' | 'PENDING_APPROVAL' | 'FAILED_CLOSED' | 'EXECUTION_FAILED';
+  risk_assessment: any;
+  analysis_completeness: string;
+  audit_sequence?: number;
+  audit_record_hash?: string;
+  reason: string;
+  allow_dispatch: boolean;
+}
+
 export interface SecurityEventItem {
   event: {
     id: string;
@@ -264,6 +275,21 @@ export class EngineClient extends EventEmitter {
     return this.call('command.analyze', {
       command,
       working_directory: workingDirectory,
+    });
+  }
+
+  public async evaluateGate(
+    command: string,
+    workingDirectory?: string,
+    failClosed = true
+  ): Promise<GateEvaluateResult> {
+    if (this.state !== 'CONNECTED') {
+      throw new Error('Engine is not connected');
+    }
+    return this.call('gate.evaluate', {
+      command,
+      working_directory: workingDirectory,
+      fail_closed: failClosed,
     });
   }
 

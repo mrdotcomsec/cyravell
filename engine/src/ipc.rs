@@ -199,6 +199,7 @@ fn dispatch_request(req: JsonRpcRequest, state: &Arc<EngineState>) -> JsonRpcRes
                     "deterministic_policy".to_string(),
                     "audit_verification".to_string(),
                     "integrity_check".to_string(),
+                    "execution_gate".to_string(),
                 ],
             };
             JsonRpcResponse::success(id, serde_json::to_value(res).unwrap())
@@ -285,6 +286,216 @@ fn dispatch_request(req: JsonRpcRequest, state: &Arc<EngineState>) -> JsonRpcRes
                 risk_assessment: assessment,
             };
             JsonRpcResponse::success(id, serde_json::to_value(res).unwrap())
+        }
+
+        "gate.evaluate" => {
+            let params = match req.params {
+                Some(p) => p,
+                None => {
+                    return JsonRpcResponse::error(
+                        id,
+                        -32602,
+                        "Missing params for gate.evaluate".to_string(),
+                        None,
+                    )
+                }
+            };
+
+            let eval_params: GateEvaluateParams = match serde_json::from_value(params) {
+                Ok(p) => p,
+                Err(e) => {
+                    return JsonRpcResponse::error(
+                        id,
+                        -32602,
+                        "Invalid gate.evaluate params format".to_string(),
+                        Some(e.to_string()),
+                    )
+                }
+            };
+
+            let raw_cmd = &eval_params.command;
+            // 1. Input Validation
+            if raw_cmd.trim().is_empty() {
+                let res = GateEvaluateResult {
+                    decision: GateDecision::Block,
+                    outcome: ExecutionOutcome::BlockedByPolicy,
+                    risk_assessment: RiskAssessment {
+                        severity: Severity::Low,
+                        confidence: Confidence::High,
+                        rule_id: "RULE-EMPTY".to_string(),
+                        reason: "Empty command string".to_string(),
+                        evidence: vec![],
+                        recommended_action: "BLOCK_AND_ALERT".to_string(),
+                        evaluated_at: chrono::Utc::now(),
+                        matched_rules: vec!["RULE-EMPTY".to_string()],
+                        potential_impact: None,
+                        analysis_completeness: AnalysisCompleteness::Complete,
+                        analysis_details: None,
+                    },
+                    analysis_completeness: AnalysisCompleteness::Complete,
+                    audit_sequence: None,
+                    audit_record_hash: None,
+                    reason: "Empty command string".to_string(),
+                    allow_dispatch: false,
+                };
+                return JsonRpcResponse::success(id, serde_json::to_value(res).unwrap());
+            }
+
+            if raw_cmd.contains('\0') {
+                let res = GateEvaluateResult {
+                    decision: GateDecision::Block,
+                    outcome: ExecutionOutcome::BlockedByPolicy,
+                    risk_assessment: RiskAssessment {
+                        severity: Severity::Critical,
+                        confidence: Confidence::High,
+                        rule_id: "RULE-NULL-BYTE".to_string(),
+                        reason: "Command contains illegal null byte".to_string(),
+                        evidence: vec!["Null byte (0x00) detected".to_string()],
+                        recommended_action: "BLOCK_AND_ALERT".to_string(),
+                        evaluated_at: chrono::Utc::now(),
+                        matched_rules: vec!["RULE-NULL-BYTE".to_string()],
+                        potential_impact: Some(
+                            "Attempted command injection or binary corruption".to_string(),
+                        ),
+                        analysis_completeness: AnalysisCompleteness::Complete,
+                        analysis_details: None,
+                    },
+                    analysis_completeness: AnalysisCompleteness::Complete,
+                    audit_sequence: None,
+                    audit_record_hash: None,
+                    reason: "Command contains illegal null byte".to_string(),
+                    allow_dispatch: false,
+                };
+                return JsonRpcResponse::success(id, serde_json::to_value(res).unwrap());
+            }
+
+            // 2. Secret Redaction
+            let sanitized = crate::analysis::redact_command(raw_cmd);
+
+            // 3. Deterministic Policy Evaluation
+            let assessment = state
+                .policy
+                .analyze_command_string(&sanitized, eval_params.working_directory.as_deref());
+
+            let (decision, outcome, allow_dispatch) = match assessment.recommended_action.as_str() {
+                "ALLOW_AND_MONITOR" => (GateDecision::Allow, ExecutionOutcome::Dispatched, true),
+                "ALERT_AND_CONFIRM" => (
+                    GateDecision::RequireApproval,
+                    ExecutionOutcome::PendingApproval,
+                    false,
+                ),
+                "BLOCK_AND_ALERT" => (
+                    GateDecision::Block,
+                    ExecutionOutcome::BlockedByPolicy,
+                    false,
+                ),
+                _ => (
+                    GateDecision::Block,
+                    ExecutionOutcome::BlockedByPolicy,
+                    false,
+                ),
+            };
+
+            // If command is blocked or pending approval, record it immediately in the audit chain
+            let (audit_seq, audit_hash) = if !allow_dispatch {
+                let action = format!("GATE_{:?}", outcome);
+                let rationale = format!(
+                    "Rule: {}, Reason: {}",
+                    assessment.rule_id, assessment.reason
+                );
+                if let Ok(rec) = state.audit.append(
+                    &format!("gate-{}", uuid::Uuid::new_v4()),
+                    &action,
+                    &rationale,
+                    assessment.severity,
+                ) {
+                    (Some(rec.sequence_number), Some(rec.current_record_hash))
+                } else {
+                    (None, None)
+                }
+            } else {
+                (None, None)
+            };
+
+            let res = GateEvaluateResult {
+                decision,
+                outcome,
+                risk_assessment: assessment.clone(),
+                analysis_completeness: assessment.analysis_completeness,
+                audit_sequence: audit_seq,
+                audit_record_hash: audit_hash,
+                reason: assessment.reason.clone(),
+                allow_dispatch,
+            };
+            JsonRpcResponse::success(id, serde_json::to_value(res).unwrap())
+        }
+
+        "gate.record_outcome" => {
+            let params = match req.params {
+                Some(p) => p,
+                None => {
+                    return JsonRpcResponse::error(
+                        id,
+                        -32602,
+                        "Missing params for gate.record_outcome".to_string(),
+                        None,
+                    )
+                }
+            };
+
+            let record_params: GateRecordOutcomeParams = match serde_json::from_value(params) {
+                Ok(p) => p,
+                Err(e) => {
+                    return JsonRpcResponse::error(
+                        id,
+                        -32602,
+                        "Invalid gate.record_outcome params format".to_string(),
+                        Some(e.to_string()),
+                    )
+                }
+            };
+
+            let sanitized = crate::analysis::redact_command(&record_params.command);
+            let action = format!("GATE_{:?}", record_params.outcome);
+            let rationale = format!(
+                "Command: {}, Decision: {:?}, ExitCode: {:?}, Detail: {}",
+                sanitized,
+                record_params.decision,
+                record_params.exit_code,
+                record_params
+                    .error_message
+                    .unwrap_or_else(|| "none".to_string())
+            );
+
+            let severity = match record_params.outcome {
+                ExecutionOutcome::BlockedByPolicy => Severity::Critical,
+                ExecutionOutcome::PendingApproval => Severity::High,
+                ExecutionOutcome::FailedClosed => Severity::High,
+                ExecutionOutcome::ExecutionFailed => Severity::Medium,
+                ExecutionOutcome::Dispatched => Severity::Low,
+            };
+
+            match state.audit.append(
+                &format!("gate-{}", uuid::Uuid::new_v4()),
+                &action,
+                &rationale,
+                severity,
+            ) {
+                Ok(rec) => {
+                    let res = GateRecordOutcomeResult {
+                        recorded: true,
+                        audit_sequence: rec.sequence_number,
+                        audit_record_hash: rec.current_record_hash,
+                    };
+                    JsonRpcResponse::success(id, serde_json::to_value(res).unwrap())
+                }
+                Err(e) => JsonRpcResponse::error(
+                    id,
+                    -32002,
+                    "Failed to append gate outcome to audit log".to_string(),
+                    Some(e.to_string()),
+                ),
+            }
         }
 
         "event.submit" => {

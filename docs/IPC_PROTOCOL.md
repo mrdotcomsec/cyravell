@@ -364,3 +364,81 @@ Verifies the cryptographic integrity of the local append-only audit hash chain.
 }
 ```
 
+---
+
+### 3.8 `gate.evaluate` (Phase 2.2)
+Evaluates a command string against security policy prior to terminal dispatch, returning a gate decision (`ALLOW`, `REQUIRE_APPROVAL`, `BLOCK`, `ANALYSIS_FAILED`). Blocked and pending commands are immediately committed to the cryptographic audit log.
+
+**Request:**
+```json
+{
+  "jsonrpc": "2.0",
+  "id": "8",
+  "method": "gate.evaluate",
+  "params": {
+    "command": "rm -rf /",
+    "working_directory": "/workspace/project",
+    "fail_closed": true
+  }
+}
+```
+
+**Response:**
+```json
+{
+  "jsonrpc": "2.0",
+  "id": "8",
+  "result": {
+    "decision": "BLOCK",
+    "outcome": "BLOCKED_BY_POLICY",
+    "allow_dispatch": false,
+    "risk_assessment": {
+      "severity": "CRITICAL",
+      "confidence": "HIGH",
+      "rule_id": "RULE-TERM-001",
+      "reason": "Potentially catastrophic recursive deletion of root, home, or system path detected",
+      "matched_rules": ["RULE-TERM-001"],
+      "potential_impact": "Permanent loss of operating system files or developer home directory data"
+    },
+    "analysis_completeness": "COMPLETE",
+    "audit_sequence": 14,
+    "audit_record_hash": "031ececbe3f0e139e14566a1b4c062ff3ccffa6cbf2c97aa8b5ef3ad65635a46",
+    "reason": "Potentially catastrophic recursive deletion of root, home, or system path detected"
+  }
+}
+```
+
+---
+
+### 3.9 `gate.record_outcome` (Phase 2.2)
+Records the terminal execution outcome (`DISPATCHED`, `BLOCKED_BY_POLICY`, `PENDING_APPROVAL`, `FAILED_CLOSED`, `EXECUTION_FAILED`) with the actual exit code in the tamper-evident audit log.
+
+**Request:**
+```json
+{
+  "jsonrpc": "2.0",
+  "id": "9",
+  "method": "gate.record_outcome",
+  "params": {
+    "command": "cargo check",
+    "decision": "ALLOW",
+    "outcome": "DISPATCHED",
+    "exit_code": 0,
+    "working_directory": "/workspace/project"
+  }
+}
+```
+
+**Response:**
+```json
+{
+  "jsonrpc": "2.0",
+  "id": "9",
+  "result": {
+    "recorded": true,
+    "audit_sequence": 15,
+    "audit_record_hash": "d42ad807c6f5a30333c9e95e79082c801b992a1a8234f78134e3008efb99d712"
+  }
+}
+```
+

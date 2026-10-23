@@ -37,6 +37,15 @@ async function runTests() {
     console.log('  ✓ analyzeCommand fails safely when disconnected');
   }
 
+  // Test 6: evaluateGate throws if engine is disconnected
+  try {
+    await client.evaluateGate('echo hello');
+    assert.fail('Expected error when evaluating gate while disconnected');
+  } catch (e) {
+    assert.ok(e.message.includes('not connected'), 'Must throw not connected error');
+    console.log('  ✓ evaluateGate fails safely when disconnected');
+  }
+
   console.log('✓ All extension client tests passed successfully!');
 }
 

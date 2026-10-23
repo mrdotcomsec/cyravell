@@ -198,7 +198,15 @@ impl CommandAnalyzer {
 /// Helper to sanitize known inline secret patterns for command display.
 pub fn redact_command(command: &str) -> String {
     let mut sanitized = command.to_string();
-    let keywords = ["password=", "token=", "bearer ", "api_key=", "secret="];
+    let keywords = [
+        "password=",
+        "token=",
+        "bearer ",
+        "api_key=",
+        "secret=",
+        "secret_key=",
+        "secret_access_key=",
+    ];
 
     for kw in &keywords {
         let mut search_idx = 0;

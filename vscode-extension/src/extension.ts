@@ -97,6 +97,39 @@ export function activate(context: vscode.ExtensionContext) {
     })
   );
 
+  context.subscriptions.push(
+    vscode.commands.registerCommand('cyravell.openControlledTerminal', () => {
+      const termConfig = vscode.workspace.getConfiguration('cyravell.controlledTerminal');
+      if (!termConfig.get<boolean>('enabled', true)) {
+        vscode.window.showWarningMessage('Cyravell controlled terminal is disabled in settings.');
+        return;
+      }
+
+      const binaryPath = termConfig.get<string>('engineBinary', 'cyravell-engine');
+      const failClosed = termConfig.get<boolean>('failClosed', true);
+      const args = ['shell'];
+      if (failClosed) {
+        args.push('--fail-closed');
+      }
+
+      const terminal = vscode.window.createTerminal({
+        name: 'Cyravell Protected Terminal',
+        shellPath: binaryPath,
+        shellArgs: args,
+      });
+
+      terminal.show();
+      statusProvider.refresh();
+      vscode.window.showInformationMessage(
+        'Launched Cyravell Protected Terminal. Commands in this terminal are intercepted and evaluated before execution dispatch.'
+      );
+    })
+  );
+
+  // Monitor terminal sessions for honest status reporting
+  context.subscriptions.push(vscode.window.onDidOpenTerminal(() => statusProvider.refresh()));
+  context.subscriptions.push(vscode.window.onDidCloseTerminal(() => statusProvider.refresh()));
+
   // Auto connect if configured
   if (config.get<boolean>('cyravell.autoConnect', true)) {
     client.connect();

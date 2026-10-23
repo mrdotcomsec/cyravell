@@ -48,6 +48,25 @@ pub enum ExecutionStatus {
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "SCREAMING_SNAKE_CASE")]
+pub enum ExecutionOutcome {
+    Dispatched,
+    BlockedByPolicy,
+    PendingApproval,
+    FailedClosed,
+    ExecutionFailed,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "SCREAMING_SNAKE_CASE")]
+pub enum GateDecision {
+    Allow,
+    RequireApproval,
+    Block,
+    AnalysisFailed,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "SCREAMING_SNAKE_CASE")]
 pub enum EnforcementCapability {
     None,
     PreExecBlock,
@@ -328,4 +347,51 @@ pub struct CommandAnalyzeParams {
 pub struct CommandAnalyzeResult {
     pub risk_assessment: RiskAssessment,
     pub analysis_completeness: AnalysisCompleteness,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct GateEvaluateParams {
+    pub command: String,
+    #[serde(default)]
+    pub working_directory: Option<String>,
+    #[serde(default = "default_fail_closed")]
+    pub fail_closed: bool,
+}
+
+fn default_fail_closed() -> bool {
+    true
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct GateEvaluateResult {
+    pub decision: GateDecision,
+    pub outcome: ExecutionOutcome,
+    pub risk_assessment: RiskAssessment,
+    pub analysis_completeness: AnalysisCompleteness,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub audit_sequence: Option<u64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub audit_record_hash: Option<String>,
+    pub reason: String,
+    pub allow_dispatch: bool,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct GateRecordOutcomeParams {
+    pub command: String,
+    pub decision: GateDecision,
+    pub outcome: ExecutionOutcome,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub exit_code: Option<i32>,
+    #[serde(default)]
+    pub working_directory: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub error_message: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct GateRecordOutcomeResult {
+    pub recorded: bool,
+    pub audit_sequence: u64,
+    pub audit_record_hash: String,
 }

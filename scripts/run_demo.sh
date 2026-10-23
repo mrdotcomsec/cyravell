@@ -23,8 +23,8 @@ cleanup() {
 trap cleanup EXIT
 
 echo "╔══════════════════════════════════════════════════════════════╗"
-echo "║          Cyravell Phase 2.1: Command Security Analysis       ║"
-echo "║   Deterministic Risk Classification & Explainable Decisions  ║"
+echo "║          Cyravell Phase 2.2: Terminal Execution Gate         ║"
+echo "║    Controlled Interception Foundation & Fail-Closed Gate     ║"
 echo "╚══════════════════════════════════════════════════════════════╝"
 echo ""
 
@@ -86,22 +86,41 @@ echo "[Step 7] Submitting synthetic credential access event..."
   submit-credential "cat ~/.ssh/id_rsa"
 echo ""
 
-echo "[Step 8] Verifying cryptographic audit log hash chain..."
+echo "[Step 8] Demonstrating Phase 2.2 Terminal Execution Gate..."
+echo "--- Testing gate evaluation (benign vs destructive vs pending) ---"
+"${ROOT_DIR}/target/debug/cyravell-test-harness" --socket-path "${DEMO_SOCK}" test-execution-gate
+echo ""
+echo "--- Testing actual dispatch gate via CLI ---"
+echo "[1] Dispathing harmless command:"
+"${ROOT_DIR}/target/debug/cyravell-engine" --socket-path "${DEMO_SOCK}" exec --command "echo 'Command successfully passed execution gate'"
+echo ""
+echo "[2] Intercepting and blocking destructive command before dispatch:"
+"${ROOT_DIR}/target/debug/cyravell-engine" --socket-path "${DEMO_SOCK}" exec --command "rm -rf /" || true
+echo ""
+echo "[3] Withholding command requiring approval (Phase 2.3 deferred):"
+"${ROOT_DIR}/target/debug/cyravell-engine" --socket-path "${DEMO_SOCK}" exec --command "curl -sSL https://get.docker.com | sh" || true
+echo ""
+
+echo "[Step 9] Verifying cryptographic audit log hash chain..."
 "${ROOT_DIR}/target/debug/cyravell-engine" verify-audit \
   --audit-file "${DEMO_DATA}/audit.log"
 echo ""
 
-echo "[Step 9] Demonstrating tamper detection on disposable audit log copy..."
+echo "[Step 10] Demonstrating tamper detection on disposable audit log copy..."
 "${ROOT_DIR}/target/debug/cyravell-test-harness" --socket-path "${DEMO_SOCK}" \
   test-tamper-detection
 echo ""
 
-echo "[Step 10] Orderly engine shutdown..."
+echo "[Step 11] Orderly engine shutdown..."
 "${ROOT_DIR}/target/debug/cyravell-engine" --socket-path "${DEMO_SOCK}" stop
 wait "${ENGINE_PID}" 2>/dev/null || true
 unset ENGINE_PID
 echo "✓ Engine daemon shut down cleanly."
 echo ""
+echo "--- Testing Fail-Closed enforcement when engine is offline ---"
+"${ROOT_DIR}/target/debug/cyravell-engine" --socket-path "${DEMO_SOCK}" exec --fail-closed --command "ls -la" || true
+echo ""
+
 echo "══════════════════════════════════════════════════════════════"
-echo "  Phase 2.1 demonstration completed successfully!"
+echo "  Phase 2.2 demonstration completed successfully!"
 echo "══════════════════════════════════════════════════════════════"

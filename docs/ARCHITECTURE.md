@@ -177,3 +177,43 @@ The command analysis pipeline operates purely on input strings without invoking 
 - **Static Approximation:** Shell analysis is an approximation. Highly obfuscated dynamic evaluation (e.g. multi-stage eval of remote network streams) cannot be fully resolved statically without dynamic tracing (reserved for future phases).
 - **Not Proof of Malice:** A critical rule match indicates potential impact and risk, not malicious intent; legitimate system administration commands may trigger alerts.
 
+---
+
+## 7. Controlled Terminal Interception Foundation (Phase 2.2)
+
+### 7.1 Architecture of the Pre-Execution Gate
+Phase 2.2 introduces the **Execution Gate (`engine/src/gate/`)**, a controlled interception boundary on Linux that captures commands *before* execution dispatch and enforces deterministic policy decisions.
+
+```
+Captured Command String
+          │
+          ▼
+   [ExecutionGate]
+          │
+          ├───► 1. Input Validation (Empty check, null byte check, >64KB limit)
+          │
+          ├───► 2. Static Analysis & Policy Evaluation (via IPC or In-Process Engine)
+          │
+          ├───► 3. Decision Gating:
+          │        ├─ GateDecision::Allow ────────► Backend.execute() ──► ExecutionOutcome::Dispatched
+          │        ├─ GateDecision::RequireApproval ─► [WITHHELD] ─────► ExecutionOutcome::PendingApproval
+          │        ├─ GateDecision::Block ──────────► [BLOCKED] ──────► ExecutionOutcome::BlockedByPolicy
+          │        └─ GateDecision::AnalysisFailed ──► [FAIL-CLOSED] ──► ExecutionOutcome::FailedClosed
+          │
+          └───► 4. Audit Recording (Redacted Command + Enforceable Outcome + SHA-256 Hash Chain)
+```
+
+### 7.2 Component Separation & Anti-Recursion
+- **`ExecutionBackend` Trait:** Decouples the security gate from the execution mechanism.
+  - `OsExecutionBackend`: Spawns authorized commands via `/bin/bash -c <cmd>`, setting `CYRAVELL_INTERCEPT_DISABLED=1` to prevent accidental recursive interception.
+  - `MockExecutionBackend`: Strictly records invocations to mathematically assert that blocked and pending commands never reach the execution backend.
+- **`ControlledShell`:** Interactive and non-interactive (`-c`) terminal wrapper. Provides the `cyravell-engine shell` session.
+- **Fail-Closed Guarantees:** If the daemon is unreachable, the IPC connection is reset, or analysis fails, `fail_closed: true` ensures that commands are blocked with outcome `FAILED_CLOSED`.
+- **VS Code Extension Integration:** The extension surfaces an opt-in `Cyravell Protected Terminal` command. It clearly distinguishes between protected controlled sessions and ordinary unprotected sessions.
+
+### 7.3 Interception Scope & Limitations
+- **Controlled Shell Scope:** Protection is guaranteed only within sessions launched via `cyravell-engine shell` or the VS Code `Cyravell Protected Terminal` profile.
+- **Ordinary Terminals Unprotected:** Standard VS Code integrated terminals running directly in bash/zsh bypass the pre-execution gate. This is explicitly reported in the extension status tree view.
+- **Child Subprocesses of Permitted Commands:** If a permitted command (e.g. `python script.py`) spawns subprocesses internally via OS syscalls, those internal subprocesses do not pass through the shell wrapper gate.
+- **Approval Workflow Deferred:** In Phase 2.2, commands requiring approval (`ALERT_AND_CONFIRM`) are held undispatched with outcome `PENDING_APPROVAL`. Interactive user approval dialogs are implemented in Phase 2.3.
+

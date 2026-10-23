@@ -65,10 +65,20 @@
         "command": "cyravell.inspectEvent",
         "title": "Cyravell: Inspect Security Event",
         "icon": "$(info)"
+      },
+      {
+        "command": "cyravell.openControlledTerminal",
+        "title": "Cyravell: Open Protected Controlled Terminal",
+        "icon": "$(terminal)"
       }
     ],
     "menus": {
       "view/title": [
+        {
+          "command": "cyravell.openControlledTerminal",
+          "when": "view == cyravell.statusView",
+          "group": "navigation"
+        },
         {
           "command": "cyravell.refreshStatus",
           "when": "view == cyravell.statusView",
@@ -110,6 +120,21 @@
           "type": "boolean",
           "default": true,
           "description": "Automatically connect to Cyravell security engine on startup."
+        },
+        "cyravell.controlledTerminal.enabled": {
+          "type": "boolean",
+          "default": true,
+          "description": "Enable Cyravell controlled terminal session with active pre-execution interception gate."
+        },
+        "cyravell.controlledTerminal.engineBinary": {
+          "type": "string",
+          "default": "cyravell-engine",
+          "description": "Path to the cyravell-engine binary used to launch the controlled terminal."
+        },
+        "cyravell.controlledTerminal.failClosed": {
+          "type": "boolean",
+          "default": true,
+          "description": "Fail closed and prevent command dispatch when the security engine daemon is offline."
         }
       }
     }

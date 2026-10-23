@@ -194,3 +194,22 @@ Before an event is appended to the audit log:
 }
 ```
 
+---
+
+## 4. Execution Gate & Outcome Schemas (Phase 2.2)
+
+### 4.1 `GateDecision` Enum
+Represents the deterministic policy decision produced by the execution gate before command dispatch:
+- `ALLOW`: Permitted by policy for execution dispatch.
+- `REQUIRE_APPROVAL`: Gated; requires explicit user approval (withheld in Phase 2.2).
+- `BLOCK`: Prohibited by policy; dispatch denied.
+- `ANALYSIS_FAILED`: Security engine offline or evaluation failed; dispatch denied under fail-closed mode.
+
+### 4.2 `ExecutionOutcome` Enum
+Enforceable outcome recorded in the cryptographic audit chain:
+- `DISPATCHED`: Command was authorized and passed to the execution backend.
+- `BLOCKED_BY_POLICY`: Execution prevented because command triggered a blocking policy rule.
+- `PENDING_APPROVAL`: Execution withheld pending interactive user approval.
+- `FAILED_CLOSED`: Execution prevented because the security engine was unreachable or evaluation failed.
+- `EXECUTION_FAILED`: Command was authorized, but the OS process spawn failed.
+
