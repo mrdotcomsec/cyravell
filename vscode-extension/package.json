@@ -1,0 +1,128 @@
+{
+  "name": "cyravell",
+  "displayName": "Cyravell",
+  "description": "Local-first security monitoring system for AI coding agents",
+  "version": "0.1.0",
+  "publisher": "cyravell",
+  "license": "Apache-2.0",
+  "engines": {
+    "vscode": "^1.80.0"
+  },
+  "categories": [
+    "Security",
+    "Other"
+  ],
+  "main": "./out/extension.js",
+  "activationEvents": [
+    "onStartupFinished"
+  ],
+  "contributes": {
+    "viewsContainers": {
+      "activitybar": [
+        {
+          "id": "cyravell-container",
+          "title": "Cyravell",
+          "icon": "media/cyravell-icon.svg"
+        }
+      ]
+    },
+    "views": {
+      "cyravell-container": [
+        {
+          "id": "cyravell.statusView",
+          "name": "Cyravell Engine Status",
+          "type": "tree"
+        },
+        {
+          "id": "cyravell.eventsView",
+          "name": "Security Events",
+          "type": "tree"
+        }
+      ]
+    },
+    "commands": [
+      {
+        "command": "cyravell.connect",
+        "title": "Cyravell: Connect Engine",
+        "icon": "$(plug)"
+      },
+      {
+        "command": "cyravell.disconnect",
+        "title": "Cyravell: Disconnect Engine",
+        "icon": "$(debug-stop)"
+      },
+      {
+        "command": "cyravell.refreshStatus",
+        "title": "Cyravell: Refresh Status",
+        "icon": "$(refresh)"
+      },
+      {
+        "command": "cyravell.verifyAudit",
+        "title": "Cyravell: Verify Audit Chain",
+        "icon": "$(shield)"
+      },
+      {
+        "command": "cyravell.inspectEvent",
+        "title": "Cyravell: Inspect Security Event",
+        "icon": "$(info)"
+      }
+    ],
+    "menus": {
+      "view/title": [
+        {
+          "command": "cyravell.refreshStatus",
+          "when": "view == cyravell.statusView",
+          "group": "navigation"
+        },
+        {
+          "command": "cyravell.connect",
+          "when": "view == cyravell.statusView",
+          "group": "navigation"
+        },
+        {
+          "command": "cyravell.disconnect",
+          "when": "view == cyravell.statusView",
+          "group": "navigation"
+        },
+        {
+          "command": "cyravell.refreshStatus",
+          "when": "view == cyravell.eventsView",
+          "group": "navigation"
+        }
+      ],
+      "view/item/context": [
+        {
+          "command": "cyravell.inspectEvent",
+          "when": "view == cyravell.eventsView",
+          "group": "inline"
+        }
+      ]
+    },
+    "configuration": {
+      "title": "Cyravell",
+      "properties": {
+        "cyravell.socketPath": {
+          "type": "string",
+          "default": "",
+          "description": "Path to the Cyravell engine Unix domain socket (leaves blank for auto-discovery)."
+        },
+        "cyravell.autoConnect": {
+          "type": "boolean",
+          "default": true,
+          "description": "Automatically connect to Cyravell security engine on startup."
+        }
+      }
+    }
+  },
+  "scripts": {
+    "vscode:prepublish": "npm run compile",
+    "compile": "./node_modules/.bin/tsc -p ./",
+    "watch": "./node_modules/.bin/tsc -watch -p ./",
+    "test": "node ./test/client.test.js"
+  },
+  "devDependencies": {
+    "@types/node": "^18.19.0",
+    "@types/vscode": "^1.80.0",
+    "typescript": "^5.3.3"
+  }
+}

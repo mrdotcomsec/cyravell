@@ -1,0 +1,21 @@
+[package]
+name = "cyravell-test-harness"
+version = "0.1.0"
+edition = "2021"
+authors = ["Cyravell Contributors"]
+license = "Apache-2.0"
+description = "Synthetic event generator and tamper test harness for Cyravell"
+
+[[bin]]
+name = "cyravell-test-harness"
+path = "src/main.rs"
+
+[dependencies]
+cyravell-engine = { path = "../engine" }
+serde = { version = "1.0", features = ["derive"] }
+serde_json = "1.0"
+clap = { version = "4.5", features = ["derive"] }
+chrono = { version = "0.4", features = ["serde"] }
+tempfile = "3.10"
+uuid = { version = "1.8", features = ["v4"] }
+

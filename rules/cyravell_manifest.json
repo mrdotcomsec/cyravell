@@ -1,0 +1,9 @@
+{
+  "manifest_version": "1.0",
+  "release_version": "0.1.0",
+  "created_at": "2026-10-23T12:00:00Z",
+  "files": {
+    "rules/baseline_rules.json": "dc7fc120befdda376be4735c922652ff65e6fe56114edb097aeaccf46d6ec946",
+    "rules/schema.json": "f172f71ba24c40953c8419c7d41c9f1291bd6c9a689616998c1f2cc819b0f594"
+  }
+}

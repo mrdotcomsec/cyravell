@@ -1,0 +1,38 @@
+{
+  "rules_version": "1.0.0",
+  "rules": [
+    {
+      "id": "RULE-TERM-001",
+      "name": "Destructive Recursive Deletion",
+      "event_type": "TERMINAL_COMMAND",
+      "severity": "CRITICAL",
+      "action": "BLOCK_AND_ALERT",
+      "description": "Detects commands attempting recursive deletion of sensitive system or home directories (e.g. rm -rf /, rm -rf ~)"
+    },
+    {
+      "id": "RULE-TERM-002",
+      "name": "Unsafe Remote Script Execution",
+      "event_type": "TERMINAL_COMMAND",
+      "severity": "HIGH",
+      "action": "ALERT",
+      "description": "Detects piped network downloads executing directly in shell (e.g. curl ... | bash, wget ... | sh)"
+    },
+    {
+      "id": "RULE-CRED-001",
+      "name": "Direct Private Credential Access",
+      "event_type": "CREDENTIAL_ACCESS",
+      "severity": "CRITICAL",
+      "action": "BLOCK_AND_ALERT",
+      "description": "Detects attempts to read SSH private keys, AWS credentials, GPG keyrings, or environment files containing secrets"
+    },
+    {
+      "id": "RULE-FILE-001",
+      "name": "Unauthorized Security Config Modification",
+      "event_type": "FILE_MODIFICATION",
+      "severity": "HIGH",
+      "action": "ALERT",
+      "description": "Detects modifications to Cyravell audit logs, manifest files, or rule directories"
+    }
+  ]
+}
+
