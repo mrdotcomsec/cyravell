@@ -66,9 +66,20 @@ Rather than trusting an AI agent to self-moderate or running security logic insi
 ## 3. Subsystem Breakdown
 
 ### 3.1 `cyravell-engine` (Rust Core)
+- **`analysis` Module (Phase 2.1):** Deterministic, explainable command security analysis pipeline:
+  - **`lexer`:** Syntax-aware tokenizer distinguishing shell operators (`;`, `|`, `&&`, `||`, `>`, `>>`, `<`, `2>`, `&>`) from quoted strings (`'...'`, `"..."`), escaped characters (`\`), command substitutions (`$(...)`, \`...\`), and environment expansions.
+  - **`ast`:** Structures commands into atomic units (`program`, `arguments`, `redirections`, `env_assignments`, `command_substitutions`), pipelines (`|`), and conditional chains (`&&`, `||`, `;`).
+  - **`detector`:** Evaluates risk across 7 categories:
+    1. *Destructive filesystem operations:* recursive deletion of root/home/system paths, disk format (`mkfs`, `wipefs`), raw block write (`dd`), fork bombs.
+    2. *Privilege and security changes:* interactive root shells (`sudo su`, `su -`), dangerous permissions (`chmod 777`, SUID), security control disabling (`ufw disable`, `setenforce 0`, `iptables -F`).
+    3. *Credential and secret access:* private keys (`id_rsa`, `id_ed25519`), cloud credentials (`.aws`), shadow passwords, environment secret dumping.
+    4. *Remote code execution:* download-and-execute pipelines (`curl ... | bash`), dynamic evaluation (`eval "$(curl ...)"`).
+    5. *Persistence and system modification:* cron jobs (`crontab`), shell startup files (`.bashrc`, `.profile`), systemd units.
+    6. *Network and data transfer:* reverse shells (`nc -e`, `socat exec`), credential exfiltration via remote POST.
+    7. *Obfuscation and indirect execution:* base64/hex decode to interpreter (`base64 -d | sh`), nested interpreters, complex chains.
 - **`ipc` Module:** Handles Unix domain socket lifecycle, listener binding, client connection pools, frame delimitation, buffer limits, timeouts, and error serialization.
 - **`model` Module:** Strongly typed definitions for events, requests, responses, risk assessments, severity levels, execution statuses, and audit records using `serde`.
-- **`policy` Module:** Deterministic evaluation pipeline. Implements baseline security rules (e.g., destructive terminal commands, credential access attempts) and calculates severity, confidence, evidence markers, and remediation recommendations.
+- **`policy` Module:** Deterministic evaluation pipeline integrating `CommandAnalyzer`. Calculates severity, confidence, evidence markers, potential impact, and remediation recommendations.
 - **`audit` Module:** Cryptographic hash-chained append-only log. Ensures each record references the SHA-256 hash of the preceding record, providing immediate mathematical detection of record alteration, deletion, or reordering.
 - **`integrity` Module:** Validates engine and asset file integrity against a trusted release manifest, isolating trust anchors from the files being measured.
 
@@ -130,8 +141,39 @@ Rather than trusting an AI agent to self-moderate or running security logic insi
 
 ## 5. Security & Privacy Guarantees
 
-1. **No Outbound Network Traffic:** Cyravell operates 100% offline. Zero telemetry, zero analytics, zero external API calls in Phase 1.
+1. **No Outbound Network Traffic:** Cyravell operates 100% offline. Zero telemetry, zero analytics, zero external API calls.
 2. **Local User Isolation:** Sockets and log directories are owned by the developer user and enforced with `0700` directory and `0600` file permissions.
 3. **No Execution of Payload Commands:** The engine never runs commands received in events. Commands are treated strictly as read-only data strings for analysis.
 4. **Deterministic Gatekeeping:** Security decisions are reproducible, rule-based, and auditable. AI outputs cannot override baseline rules.
+
+---
+
+## 6. Command Security Analysis Pipeline (Phase 2.1)
+
+### 6.1 Analysis Architecture & Data Flow
+The command analysis pipeline operates purely on input strings without invoking shell interpreters, subshells, or system calls:
+1. **Input Validation:** Enforces payload length limit (64 KiB), checks UTF-8 validity, rejects null bytes (`\0`), and handles empty/whitespace inputs gracefully.
+2. **Syntax-Aware Lexing:** The lexer distinguishes operators (`;`, `&&`, `||`, `|`, redirections) from inside quoted strings (`"..."`, `'...'`) and handles backslash escapes. Unclosed quotes or command substitutions downgrade `AnalysisCompleteness` to `Partial` or `Inconclusive`.
+3. **AST Construction:** Builds atomic commands with programs, unquoted arguments, redirections, environment assignments, and command substitutions.
+4. **Multi-Category Detection:** Matches against the 7 defined risk categories:
+   - Destructive filesystem actions
+   - Privilege & security modifications
+   - Credential access
+   - Remote code execution pipelines
+   - Persistence changes
+   - Network exfiltration
+   - Obfuscated execution
+5. **Deterministic Classification:** The highest matching severity is selected (`Critical > High > Medium > Low > Info`), all matching rule IDs are preserved, evidence items are aggregated, and potential impact is detailed.
+6. **Secret Redaction:** Commands are scrubbed of sensitive inline tokens (`password=`, `token=`, `bearer `, `api_key=`) before being recorded to audit logs.
+
+### 6.2 Adding a New Deterministic Rule
+1. Add the declarative rule definition to `rules/baseline_rules.json` with a unique ID (`RULE-...`), severity, description, and recommended action.
+2. Implement or update the detector logic in `engine/src/analysis/detector.rs` matching the AST program, arguments, pipeline, or redirection pattern.
+3. Add a corresponding unit test in `engine/src/analysis/mod.rs`.
+4. Recompute the SHA-256 digest of `rules/baseline_rules.json` and update `rules/cyravell_manifest.json`.
+
+### 6.3 Limitations & Boundary Statement
+- **Analysis Only:** Phase 2.1 analyzes and classifies command risks. It **does not** intercept commands before execution or claim OS-level blocking.
+- **Static Approximation:** Shell analysis is an approximation. Highly obfuscated dynamic evaluation (e.g. multi-stage eval of remote network streams) cannot be fully resolved statically without dynamic tracing (reserved for future phases).
+- **Not Proof of Malice:** A critical rule match indicates potential impact and risk, not malicious intent; legitimate system administration commands may trigger alerts.
 

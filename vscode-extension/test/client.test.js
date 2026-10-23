@@ -28,6 +28,15 @@ async function runTests() {
   assert.ok(defaultClient.getSocketPath().includes('cyravell.sock'), 'Default socket path should include cyravell.sock');
   console.log('  ✓ Socket path resolved accurately: ' + defaultClient.getSocketPath());
 
+  // Test 5: analyzeCommand throws if engine is disconnected
+  try {
+    await client.analyzeCommand('echo hello');
+    assert.fail('Expected error when analyzing command while disconnected');
+  } catch (e) {
+    assert.ok(e.message.includes('not connected'), 'Must throw not connected error');
+    console.log('  ✓ analyzeCommand fails safely when disconnected');
+  }
+
   console.log('✓ All extension client tests passed successfully!');
 }
 

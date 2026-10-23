@@ -24,6 +24,16 @@ export interface IntegrityInfo {
   details: string;
 }
 
+export interface CommandAnalysisDetails {
+  raw_command: string;
+  sanitized_command: string;
+  atomic_commands_count: number;
+  operators_detected: string[];
+  command_names: string[];
+  potential_impact?: string;
+  analysis_notes: string[];
+}
+
 export interface SecurityEventItem {
   event: {
     id: string;
@@ -42,13 +52,17 @@ export interface SecurityEventItem {
     };
   };
   assessment: {
-    severity: 'LOW' | 'MEDIUM' | 'HIGH' | 'CRITICAL';
+    severity: 'INFO' | 'LOW' | 'MEDIUM' | 'HIGH' | 'CRITICAL';
     confidence: 'LOW' | 'MEDIUM' | 'HIGH';
     rule_id: string;
     reason: string;
     evidence: string[];
     recommended_action: string;
     evaluated_at: string;
+    matched_rules?: string[];
+    potential_impact?: string;
+    analysis_completeness?: 'COMPLETE' | 'PARTIAL' | 'INCONCLUSIVE';
+    analysis_details?: CommandAnalysisDetails;
   };
   audit_sequence: number;
   audit_hash: string;
@@ -241,6 +255,16 @@ export class EngineClient extends EventEmitter {
       throw new Error('Engine is not connected');
     }
     return this.call('audit.verify', {});
+  }
+
+  public async analyzeCommand(command: string, workingDirectory?: string): Promise<any> {
+    if (this.state !== 'CONNECTED') {
+      throw new Error('Engine is not connected');
+    }
+    return this.call('command.analyze', {
+      command,
+      working_directory: workingDirectory,
+    });
   }
 
   public call(method: string, params: any): Promise<any> {

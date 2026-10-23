@@ -1,5 +1,5 @@
 {
-  "rules_version": "1.0.0",
+  "rules_version": "2.1.0",
   "rules": [
     {
       "id": "RULE-TERM-001",
@@ -14,8 +14,56 @@
       "name": "Unsafe Remote Script Execution",
       "event_type": "TERMINAL_COMMAND",
       "severity": "HIGH",
-      "action": "ALERT",
+      "action": "ALERT_AND_CONFIRM",
       "description": "Detects piped network downloads executing directly in shell (e.g. curl ... | bash, wget ... | sh)"
+    },
+    {
+      "id": "RULE-TERM-003",
+      "name": "Raw Disk and Filesystem Format",
+      "event_type": "TERMINAL_COMMAND",
+      "severity": "CRITICAL",
+      "action": "BLOCK_AND_ALERT",
+      "description": "Detects low-level disk formatting or partition destruction utilities (mkfs, wipefs, dd of=/dev/sd...)"
+    },
+    {
+      "id": "RULE-TERM-004",
+      "name": "Denial of Service Fork Bomb",
+      "event_type": "TERMINAL_COMMAND",
+      "severity": "CRITICAL",
+      "action": "BLOCK_AND_ALERT",
+      "description": "Detects self-replicating shell fork-bomb signatures causing host resource exhaustion"
+    },
+    {
+      "id": "RULE-TERM-005",
+      "name": "Broad Wildcard Deletion",
+      "event_type": "TERMINAL_COMMAND",
+      "severity": "HIGH",
+      "action": "ALERT_AND_CONFIRM",
+      "description": "Detects recursive deletion targeting broad wildcard patterns (*, .*)"
+    },
+    {
+      "id": "RULE-PRIV-001",
+      "name": "Unrestricted Privilege Escalation Request",
+      "event_type": "TERMINAL_COMMAND",
+      "severity": "HIGH",
+      "action": "ALERT_AND_CONFIRM",
+      "description": "Detects requests for root shells or unrestricted privilege elevation (sudo su, su -, pkexec)"
+    },
+    {
+      "id": "RULE-PRIV-002",
+      "name": "Dangerous Global Permission Modification",
+      "event_type": "TERMINAL_COMMAND",
+      "severity": "HIGH",
+      "action": "ALERT_AND_CONFIRM",
+      "description": "Detects application of world-writable permissions (chmod 777) or SUID bit modifications"
+    },
+    {
+      "id": "RULE-SEC-001",
+      "name": "Security Control Deactivation",
+      "event_type": "TERMINAL_COMMAND",
+      "severity": "CRITICAL",
+      "action": "BLOCK_AND_ALERT",
+      "description": "Detects attempts to disable SELinux (setenforce 0), firewall (ufw disable, iptables -F), or security daemons"
     },
     {
       "id": "RULE-CRED-001",
@@ -23,16 +71,79 @@
       "event_type": "CREDENTIAL_ACCESS",
       "severity": "CRITICAL",
       "action": "BLOCK_AND_ALERT",
-      "description": "Detects attempts to read SSH private keys, AWS credentials, GPG keyrings, or environment files containing secrets"
+      "description": "Detects attempts to read SSH private keys, AWS credentials, GPG keyrings, or shadow password hashes"
+    },
+    {
+      "id": "RULE-CRED-002",
+      "name": "Environment and Secret Variable Dumping",
+      "event_type": "TERMINAL_COMMAND",
+      "severity": "HIGH",
+      "action": "ALERT_AND_CONFIRM",
+      "description": "Detects dumping of process environment variables containing active secrets into files or network streams"
+    },
+    {
+      "id": "RULE-RCE-001",
+      "name": "Dynamic Evaluation of Remote Fetch",
+      "event_type": "TERMINAL_COMMAND",
+      "severity": "HIGH",
+      "action": "ALERT_AND_CONFIRM",
+      "description": "Detects dynamic eval or execution of command substitutions pulling unverified remote content"
+    },
+    {
+      "id": "RULE-PERS-001",
+      "name": "Persistence Configuration Modification",
+      "event_type": "TERMINAL_COMMAND",
+      "severity": "HIGH",
+      "action": "ALERT_AND_CONFIRM",
+      "description": "Detects modifications to scheduled tasks (crontab), shell startup files (.bashrc, .profile), or systemd units"
+    },
+    {
+      "id": "RULE-NET-001",
+      "name": "Reverse Shell or Network Execution Pipe",
+      "event_type": "TERMINAL_COMMAND",
+      "severity": "CRITICAL",
+      "action": "BLOCK_AND_ALERT",
+      "description": "Detects network streaming tools (nc, ncat, socat) configured with program execution (-e / exec)"
+    },
+    {
+      "id": "RULE-NET-002",
+      "name": "Credential Exfiltration via Remote POST",
+      "event_type": "TERMINAL_COMMAND",
+      "severity": "CRITICAL",
+      "action": "BLOCK_AND_ALERT",
+      "description": "Detects network upload utilities sending local credential or key files to remote endpoints"
+    },
+    {
+      "id": "RULE-OBFS-001",
+      "name": "Obfuscated / Encoded Command Execution",
+      "event_type": "TERMINAL_COMMAND",
+      "severity": "HIGH",
+      "action": "ALERT_AND_CONFIRM",
+      "description": "Detects encoded or obfuscated payloads (base64 -d, xxd -r) piped into interpreters"
+    },
+    {
+      "id": "RULE-OBFS-002",
+      "name": "Suspicious Nested Interpreter / Complex Chain",
+      "event_type": "TERMINAL_COMMAND",
+      "severity": "MEDIUM",
+      "action": "ALERT_AND_CONFIRM",
+      "description": "Detects suspicious nested interpreter chains or unusually complex command structures reducing analysis confidence"
     },
     {
       "id": "RULE-FILE-001",
       "name": "Unauthorized Security Config Modification",
       "event_type": "FILE_MODIFICATION",
       "severity": "HIGH",
-      "action": "ALERT",
+      "action": "ALERT_AND_CONFIRM",
       "description": "Detects modifications to Cyravell audit logs, manifest files, or rule directories"
+    },
+    {
+      "id": "RULE-BASE-001",
+      "name": "Standard Development Operation",
+      "event_type": "TERMINAL_COMMAND",
+      "severity": "LOW",
+      "action": "ALLOW_AND_MONITOR",
+      "description": "Standard development and build command operating within expected baseline parameters"
     }
   ]
 }
-

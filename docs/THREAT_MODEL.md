@@ -99,8 +99,9 @@ We classify potential threat actors into the following tiers:
 
 ### 5.1 Terminal & Shell Commands
 - **Threat:** AI agent executes destructive or exfiltrating shell commands (`rm -rf`, `curl ... | bash`, `nc -e`, `printenv > exfil`).
-- **Phase 1 Status:** Testable synthetic event model with deterministic baseline policy rules detecting destructive commands (e.g., recursive deletion of root or home directory, raw credential dumping).
-- **Phase 1 Limitation:** Phase 1 uses synthetic event generation for verification; interception of actual terminal pseudo-terminals (PTYs) or eBPF syscall filtering is planned for Phase 2/3.
+- **Phase 2.1 Status:** Implemented deterministic, explainable static command security analysis pipeline with shell operator and pipeline awareness (`CommandAnalyzer`). Recognizes 7 threat categories: destructive filesystem operations, privilege escalation, credential access, remote code execution pipelines, persistence, network exfiltration, and encoded execution.
+- **Phase 2.1 Limitation:** Static analysis and classification only. Does not intercept terminal pseudo-terminals (PTYs), execute approval gates, or claim OS-level blocking (planned for Phase 2.2/2.3).
+- **Classification vs Maliciousness:** Command risk classification reflects potential operational impact, not definitive proof of malicious intent. Unvetted or obfuscated commands may be flagged as high severity even if invoked by a developer in a test setting.
 
 ### 5.2 Local IPC Exposure & Message Poisoning
 - **Threat:** Malicious process sends malformed, deeply nested, or oversized JSON payloads to crash or exhaust memory in `cyravell-engine`.
@@ -140,11 +141,11 @@ We classify potential threat actors into the following tiers:
 
 ---
 
-## 8. Known Limitations (Phase 1)
+## 8. Known Limitations (Phase 2.1)
 
-- **Synthetic vs. Intercepted:** Phase 1 implements a verified end-to-end slice with synthetic security events. It does not claim real-time OS-level syscall blocking.
-- **Audit Tamper Evident, Not Tamper Proof:** A local user who has write access to the filesystem can theoretically rewrite both the log and recompute a fraudulent hash chain if they possess all trust material. True non-repudiation requires remote append-only anchoring (Phase 3).
-- **Heuristic Baseline:** Baseline rules in Phase 1 demonstrate deterministic evaluation but do not cover all permutations of shell obfuscation.
+- **Static Classification vs. Real-Time Blocking:** Phase 2.1 implements static command security analysis and risk classification. It does not claim real-time OS-level command interception or process blocking. Real command interception requires subsequent PTY or eBPF layers.
+- **Audit Tamper Evident, Not Tamper Proof:** A local user with write access to the filesystem can theoretically rewrite the log and recompute a fraudulent hash chain if they possess all trust material. True non-repudiation requires remote append-only anchoring (Phase 3).
+- **Parser Approximations:** Pure static analysis cannot fully resolve dynamic multi-stage variable expansions or remote runtime code strings without execution. Complex or unclosed constructs are honestly flagged as `PARTIAL` or `INCONCLUSIVE`.
 
 ---
 

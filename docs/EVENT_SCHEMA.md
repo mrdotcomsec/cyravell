@@ -126,3 +126,71 @@ Before an event is appended to the audit log:
 2. Commands are scanned for common inline secret patterns (`--password`, `token=`, `Bearer `, `PRIVATE KEY`). Detected patterns are replaced with `[REDACTED]`.
 3. File contents are never captured in the event payload.
 
+---
+
+## 4. Risk Assessment & Command Analysis Schema (Phase 2.1)
+
+```json
+{
+  "title": "RiskAssessment",
+  "type": "object",
+  "required": [
+    "severity",
+    "confidence",
+    "rule_id",
+    "reason",
+    "evidence",
+    "recommended_action",
+    "evaluated_at"
+  ],
+  "properties": {
+    "severity": {
+      "type": "string",
+      "enum": ["INFO", "LOW", "MEDIUM", "HIGH", "CRITICAL"]
+    },
+    "confidence": {
+      "type": "string",
+      "enum": ["LOW", "MEDIUM", "HIGH"]
+    },
+    "rule_id": { "type": "string" },
+    "matched_rules": {
+      "type": "array",
+      "items": { "type": "string" }
+    },
+    "reason": { "type": "string" },
+    "evidence": {
+      "type": "array",
+      "items": { "type": "string" }
+    },
+    "potential_impact": { "type": "string" },
+    "recommended_action": { "type": "string" },
+    "analysis_completeness": {
+      "type": "string",
+      "enum": ["COMPLETE", "PARTIAL", "INCONCLUSIVE"]
+    },
+    "analysis_details": {
+      "type": "object",
+      "properties": {
+        "raw_command": { "type": "string" },
+        "sanitized_command": { "type": "string" },
+        "atomic_commands_count": { "type": "integer" },
+        "operators_detected": {
+          "type": "array",
+          "items": { "type": "string" }
+        },
+        "command_names": {
+          "type": "array",
+          "items": { "type": "string" }
+        },
+        "potential_impact": { "type": "string" },
+        "analysis_notes": {
+          "type": "array",
+          "items": { "type": "string" }
+        }
+      }
+    },
+    "evaluated_at": { "type": "string", "format": "date-time" }
+  }
+}
+```
+

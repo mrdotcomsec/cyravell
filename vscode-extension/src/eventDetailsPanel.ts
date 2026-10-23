@@ -64,7 +64,26 @@ export class EventDetailsPanel {
     const severityColor =
       item.assessment.severity === 'CRITICAL' ? '#d73a49' :
       item.assessment.severity === 'HIGH' ? '#e36209' :
-      item.assessment.severity === 'MEDIUM' ? '#d9a700' : '#22863a';
+      item.assessment.severity === 'MEDIUM' ? '#d9a700' :
+      item.assessment.severity === 'LOW' ? '#22863a' : '#0366d6';
+
+    const matchedRules = (item.assessment.matched_rules || [item.assessment.rule_id]).map(r => `<code>${escapeHtml(r)}</code>`).join(' ');
+    const completeness = item.assessment.analysis_completeness || 'COMPLETE';
+    const impact = item.assessment.potential_impact ? `<tr><td class="label">Potential Impact:</td><td><strong>${escapeHtml(item.assessment.potential_impact)}</strong></td></tr>` : '';
+    const details = item.assessment.analysis_details;
+
+    const commandDetailsHtml = details ? `
+      <div class="card">
+        <h3>Command Syntax Analysis</h3>
+        <table>
+          <tr><td class="label">Atomic Commands Count:</td><td><code>${details.atomic_commands_count}</code></td></tr>
+          <tr><td class="label">Programs Identified:</td><td>${details.command_names.map(c => `<code>${escapeHtml(c)}</code>`).join(' ') || 'None'}</td></tr>
+          <tr><td class="label">Operators Detected:</td><td>${details.operators_detected.map(o => `<code>${escapeHtml(o)}</code>`).join(' ') || 'None (Single Command)'}</td></tr>
+          <tr><td class="label">Analysis Completeness:</td><td><code>${escapeHtml(completeness)}</code></td></tr>
+        </table>
+        ${details.analysis_notes.length ? `<h4>Analysis Notes & Limitations</h4><ul>${details.analysis_notes.map(n => `<li>${escapeHtml(n)}</li>`).join('')}</ul>` : ''}
+      </div>
+    ` : '';
 
     return `<!DOCTYPE html>
 <html lang="en">
@@ -146,8 +165,11 @@ export class EventDetailsPanel {
   <div class="card">
     <h3>Deterministic Risk Assessment</h3>
     <table>
-      <tr><td class="label">Rule ID:</td><td><code>${escapeHtml(item.assessment.rule_id)}</code></td></tr>
+      <tr><td class="label">Primary Rule:</td><td><code>${escapeHtml(item.assessment.rule_id)}</code></td></tr>
+      <tr><td class="label">All Matched Rules:</td><td>${matchedRules}</td></tr>
       <tr><td class="label">Reason:</td><td>${escapeHtml(item.assessment.reason)}</td></tr>
+      ${impact}
+      <tr><td class="label">Analysis Completeness:</td><td><code>${escapeHtml(completeness)}</code></td></tr>
       <tr><td class="label">Recommended Action:</td><td><code>${escapeHtml(item.assessment.recommended_action)}</code></td></tr>
       <tr><td class="label">Confidence:</td><td>${escapeHtml(item.assessment.confidence)}</td></tr>
       <tr><td class="label">Evaluated At:</td><td>${escapeHtml(item.assessment.evaluated_at)}</td></tr>
@@ -155,6 +177,8 @@ export class EventDetailsPanel {
     <h4>Evidence</h4>
     <ul>${evidenceList.length ? evidenceList : '<li>None</li>'}</ul>
   </div>
+
+  ${commandDetailsHtml}
 
   <div class="card">
     <h3>Event Context & Payload</h3>

@@ -27,7 +27,11 @@ impl fmt::Display for AuditError {
             Self::Io(e) => write!(f, "IO error: {}", e),
             Self::Json(e) => write!(f, "JSON serialization error: {}", e),
             Self::VerificationFailure { sequence, reason } => {
-                write!(f, "Audit verification failure at sequence {}: {}", sequence, reason)
+                write!(
+                    f,
+                    "Audit verification failure at sequence {}: {}",
+                    sequence, reason
+                )
             }
         }
     }
@@ -120,13 +124,7 @@ impl AuditLog {
         let prev_hash = state.last_hash.clone();
 
         let current_hash = compute_record_hash(
-            next_seq,
-            &timestamp,
-            event_id,
-            action,
-            rationale,
-            severity,
-            &prev_hash,
+            next_seq, &timestamp, event_id, action, rationale, severity, &prev_hash,
         );
 
         let record = AuditRecord {
@@ -221,7 +219,10 @@ impl AuditLog {
                         genesis_hash: GENESIS_HASH.to_string(),
                         latest_hash: expected_prev_hash.clone(),
                         corrupted_sequence: Some(expected_seq),
-                        message: format!("Malformed record JSON at sequence {}: {}", expected_seq, e),
+                        message: format!(
+                            "Malformed record JSON at sequence {}: {}",
+                            expected_seq, e
+                        ),
                     };
                 }
             };
@@ -339,11 +340,15 @@ mod tests {
         let audit = AuditLog::open(&log_path).unwrap();
         assert_eq!(audit.total_records(), 0);
 
-        let rec1 = audit.append("evt-1", "BLOCK", "Destructive command", Severity::Critical).unwrap();
+        let rec1 = audit
+            .append("evt-1", "BLOCK", "Destructive command", Severity::Critical)
+            .unwrap();
         assert_eq!(rec1.sequence_number, 1);
         assert_eq!(rec1.previous_record_hash, GENESIS_HASH);
 
-        let rec2 = audit.append("evt-2", "ALLOW", "Safe operation", Severity::Low).unwrap();
+        let rec2 = audit
+            .append("evt-2", "ALLOW", "Safe operation", Severity::Low)
+            .unwrap();
         assert_eq!(rec2.sequence_number, 2);
         assert_eq!(rec2.previous_record_hash, rec1.current_record_hash);
 
@@ -359,8 +364,12 @@ mod tests {
         let log_path = dir.path().join("tamper_test.log");
 
         let audit = AuditLog::open(&log_path).unwrap();
-        audit.append("evt-1", "BLOCK", "Initial block", Severity::Critical).unwrap();
-        audit.append("evt-2", "ALERT", "Second alert", Severity::High).unwrap();
+        audit
+            .append("evt-1", "BLOCK", "Initial block", Severity::Critical)
+            .unwrap();
+        audit
+            .append("evt-2", "ALERT", "Second alert", Severity::High)
+            .unwrap();
 
         // Verify valid first
         let initial_check = audit.verify();
@@ -384,9 +393,15 @@ mod tests {
         let log_path = dir.path().join("deletion_test.log");
 
         let audit = AuditLog::open(&log_path).unwrap();
-        audit.append("evt-1", "BLOCK", "First", Severity::Critical).unwrap();
-        audit.append("evt-2", "ALERT", "Second", Severity::High).unwrap();
-        audit.append("evt-3", "ALLOW", "Third", Severity::Low).unwrap();
+        audit
+            .append("evt-1", "BLOCK", "First", Severity::Critical)
+            .unwrap();
+        audit
+            .append("evt-2", "ALERT", "Second", Severity::High)
+            .unwrap();
+        audit
+            .append("evt-3", "ALLOW", "Third", Severity::Low)
+            .unwrap();
 
         // Delete the middle line (sequence 2)
         let content = std::fs::read_to_string(&log_path).unwrap();
@@ -399,4 +414,3 @@ mod tests {
         assert_eq!(check.corrupted_sequence, Some(3));
     }
 }
-

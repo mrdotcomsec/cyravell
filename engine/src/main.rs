@@ -56,11 +56,21 @@ enum Commands {
     Status,
     /// Send shutdown signal to a running engine instance
     Stop,
+    /// Perform static security analysis on a command string without executing it
+    Analyze {
+        #[arg(short, long)]
+        command: String,
+
+        #[arg(short, long)]
+        working_dir: Option<String>,
+    },
 }
 
 fn default_socket_path() -> PathBuf {
     if let Ok(runtime_dir) = std::env::var("XDG_RUNTIME_DIR") {
-        PathBuf::from(runtime_dir).join("cyravell").join("cyravell.sock")
+        PathBuf::from(runtime_dir)
+            .join("cyravell")
+            .join("cyravell.sock")
     } else {
         let uid = unsafe { libc_uid() };
         PathBuf::from(format!("/tmp/cyravell-{}/cyravell.sock", uid))
@@ -71,7 +81,10 @@ fn default_data_dir() -> PathBuf {
     if let Ok(data_home) = std::env::var("XDG_DATA_HOME") {
         PathBuf::from(data_home).join("cyravell")
     } else if let Ok(home) = std::env::var("HOME") {
-        PathBuf::from(home).join(".local").join("share").join("cyravell")
+        PathBuf::from(home)
+            .join(".local")
+            .join("share")
+            .join("cyravell")
     } else {
         PathBuf::from("/tmp/cyravell-data")
     }
@@ -114,7 +127,10 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         }
 
         Commands::VerifyAudit { audit_file } => {
-            println!("Verifying cryptographic audit log: {}", audit_file.display());
+            println!(
+                "Verifying cryptographic audit log: {}",
+                audit_file.display()
+            );
             let audit = AuditLog::open(&audit_file)?;
             let result = audit.verify();
 
@@ -162,7 +178,11 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             let mut stream = match UnixStream::connect(&socket_path) {
                 Ok(s) => s,
                 Err(e) => {
-                    eprintln!("Cyravell engine is NOT running on {}: {}", socket_path.display(), e);
+                    eprintln!(
+                        "Cyravell engine is NOT running on {}: {}",
+                        socket_path.display(),
+                        e
+                    );
                     std::process::exit(2);
                 }
             };
@@ -196,7 +216,11 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             let mut stream = match UnixStream::connect(&socket_path) {
                 Ok(s) => s,
                 Err(e) => {
-                    eprintln!("Cyravell engine is NOT running on {}: {}", socket_path.display(), e);
+                    eprintln!(
+                        "Cyravell engine is NOT running on {}: {}",
+                        socket_path.display(),
+                        e
+                    );
                     std::process::exit(2);
                 }
             };
@@ -215,8 +239,31 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
             println!("Sent shutdown signal to Cyravell engine.");
         }
+
+        Commands::Analyze {
+            command,
+            working_dir,
+        } => {
+            println!("Analyzing command: {}", command);
+            let policy = cyravell_engine::PolicyEngine::new();
+            let assessment = policy.analyze_command_string(&command, working_dir.as_deref());
+
+            println!("Severity:     {:?}", assessment.severity);
+            println!("Confidence:   {:?}", assessment.confidence);
+            println!("Primary Rule: {}", assessment.rule_id);
+            println!("All Matched:  {:?}", assessment.matched_rules);
+            println!("Completeness: {:?}", assessment.analysis_completeness);
+            println!("Reason:       {}", assessment.reason);
+            if let Some(impact) = assessment.potential_impact {
+                println!("Impact:       {}", impact);
+            }
+            println!("Action:       {}", assessment.recommended_action);
+            println!("Evidence:");
+            for ev in &assessment.evidence {
+                println!("  - {}", ev);
+            }
+        }
     }
 
     Ok(())
 }
-

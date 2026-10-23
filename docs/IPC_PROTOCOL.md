@@ -171,7 +171,60 @@ Returns release integrity verification status.
 
 ---
 
-### 3.4 `event.submit`
+### 3.4 `command.analyze` (Phase 2.1)
+Performs static security analysis on a command string without execution and without appending to the persistent audit log.
+
+**Request:**
+```json
+{
+  "jsonrpc": "2.0",
+  "id": "4",
+  "method": "command.analyze",
+  "params": {
+    "command": "git status && rm -rf /",
+    "working_directory": "/workspace"
+  }
+}
+```
+
+**Response:**
+```json
+{
+  "jsonrpc": "2.0",
+  "id": "4",
+  "result": {
+    "analysis_completeness": "COMPLETE",
+    "risk_assessment": {
+      "severity": "CRITICAL",
+      "confidence": "HIGH",
+      "rule_id": "RULE-TERM-001",
+      "matched_rules": ["RULE-TERM-001"],
+      "reason": "Potentially catastrophic recursive deletion of root, home, or system path detected",
+      "evidence": [
+        "Command: rm (recursive=true, force=true)",
+        "Target path: /"
+      ],
+      "potential_impact": "Permanent loss of operating system files or developer home directory data",
+      "recommended_action": "BLOCK_AND_ALERT",
+      "analysis_completeness": "COMPLETE",
+      "evaluated_at": "2026-10-23T14:30:00Z",
+      "analysis_details": {
+        "raw_command": "git status && rm -rf /",
+        "sanitized_command": "git status && rm -rf /",
+        "atomic_commands_count": 2,
+        "command_names": ["git", "rm"],
+        "operators_detected": ["&&"],
+        "potential_impact": "Permanent loss of operating system files or developer home directory data",
+        "analysis_notes": ["Working directory: /workspace"]
+      }
+    }
+  }
+}
+```
+
+---
+
+### 3.5 `event.submit`
 Submits a security event for evaluation and audit recording.
 
 **Request:**

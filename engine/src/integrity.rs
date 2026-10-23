@@ -116,7 +116,10 @@ pub fn verify_manifest<P: AsRef<Path>, B: AsRef<Path>>(
     for (rel_path, expected_hash) in &manifest.files {
         // Enforce safe relative path resolution (no escaping base directory)
         if rel_path.starts_with('/') || rel_path.contains("..") {
-            mismatched.push(format!("Illegal path traversal detected in manifest: {}", rel_path));
+            mismatched.push(format!(
+                "Illegal path traversal detected in manifest: {}",
+                rel_path
+            ));
             continue;
         }
 
@@ -272,4 +275,3 @@ mod tests {
         assert!(report.mismatched_files[0].contains("Illegal path traversal"));
     }
 }
-

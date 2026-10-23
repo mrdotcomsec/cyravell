@@ -164,7 +164,10 @@ fn handle_client(mut stream: UnixStream, state: Arc<EngineState>) {
                     break;
                 }
             }
-            Err(ref e) if e.kind() == std::io::ErrorKind::WouldBlock || e.kind() == std::io::ErrorKind::TimedOut => {
+            Err(ref e)
+                if e.kind() == std::io::ErrorKind::WouldBlock
+                    || e.kind() == std::io::ErrorKind::TimedOut =>
+            {
                 // Keep-alive or timeout check
                 if state.shutdown_requested.load(Ordering::SeqCst) {
                     break;
@@ -243,6 +246,43 @@ fn dispatch_request(req: JsonRpcRequest, state: &Arc<EngineState>) -> JsonRpcRes
                 manifest_version: report.manifest_version,
                 verified_files_count: report.verified_files_count,
                 details: report.details,
+            };
+            JsonRpcResponse::success(id, serde_json::to_value(res).unwrap())
+        }
+
+        "command.analyze" => {
+            let params = match req.params {
+                Some(p) => p,
+                None => {
+                    return JsonRpcResponse::error(
+                        id,
+                        -32602,
+                        "Missing params for command.analyze".to_string(),
+                        None,
+                    )
+                }
+            };
+
+            let analyze_params: CommandAnalyzeParams = match serde_json::from_value(params) {
+                Ok(p) => p,
+                Err(e) => {
+                    return JsonRpcResponse::error(
+                        id,
+                        -32602,
+                        "Invalid command.analyze params format".to_string(),
+                        Some(e.to_string()),
+                    )
+                }
+            };
+
+            let assessment = state.policy.analyze_command_string(
+                &analyze_params.command,
+                analyze_params.working_directory.as_deref(),
+            );
+
+            let res = CommandAnalyzeResult {
+                analysis_completeness: assessment.analysis_completeness,
+                risk_assessment: assessment,
             };
             JsonRpcResponse::success(id, serde_json::to_value(res).unwrap())
         }
@@ -345,12 +385,8 @@ fn dispatch_request(req: JsonRpcRequest, state: &Arc<EngineState>) -> JsonRpcRes
                 .unwrap_or(50);
 
             let recent = state.recent_events.lock().unwrap();
-            let events_vec: Vec<EvaluatedEventRecord> = recent
-                .iter()
-                .rev()
-                .take(limit)
-                .cloned()
-                .collect();
+            let events_vec: Vec<EvaluatedEventRecord> =
+                recent.iter().rev().take(limit).cloned().collect();
 
             let res = RecentEventsResult { events: events_vec };
             JsonRpcResponse::success(id, serde_json::to_value(res).unwrap())
@@ -410,4 +446,3 @@ fn dispatch_request(req: JsonRpcRequest, state: &Arc<EngineState>) -> JsonRpcRes
         ),
     }
 }
-

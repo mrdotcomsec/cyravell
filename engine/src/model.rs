@@ -57,10 +57,31 @@ pub enum EnforcementCapability {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
 #[serde(rename_all = "SCREAMING_SNAKE_CASE")]
 pub enum Severity {
+    Info,
     Low,
     Medium,
     High,
     Critical,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "SCREAMING_SNAKE_CASE")]
+pub enum AnalysisCompleteness {
+    Complete,
+    Partial,
+    Inconclusive,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct CommandAnalysisDetails {
+    pub raw_command: String,
+    pub sanitized_command: String,
+    pub atomic_commands_count: usize,
+    pub operators_detected: Vec<String>,
+    pub command_names: Vec<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub potential_impact: Option<String>,
+    pub analysis_notes: Vec<String>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -125,6 +146,18 @@ pub struct RiskAssessment {
     pub evidence: Vec<String>,
     pub recommended_action: String,
     pub evaluated_at: DateTime<Utc>,
+    #[serde(default)]
+    pub matched_rules: Vec<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub potential_impact: Option<String>,
+    #[serde(default = "default_completeness")]
+    pub analysis_completeness: AnalysisCompleteness,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub analysis_details: Option<CommandAnalysisDetails>,
+}
+
+fn default_completeness() -> AnalysisCompleteness {
+    AnalysisCompleteness::Complete
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -180,12 +213,21 @@ impl JsonRpcResponse {
         }
     }
 
-    pub fn error(id: serde_json::Value, code: i32, message: String, details: Option<String>) -> Self {
+    pub fn error(
+        id: serde_json::Value,
+        code: i32,
+        message: String,
+        details: Option<String>,
+    ) -> Self {
         Self {
             jsonrpc: "2.0".to_string(),
             id,
             result: None,
-            error: Some(JsonRpcError { code, message, details }),
+            error: Some(JsonRpcError {
+                code,
+                message,
+                details,
+            }),
         }
     }
 }
@@ -275,3 +317,15 @@ pub struct AuditVerifyResult {
     pub message: String,
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct CommandAnalyzeParams {
+    pub command: String,
+    #[serde(default)]
+    pub working_directory: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct CommandAnalyzeResult {
+    pub risk_assessment: RiskAssessment,
+    pub analysis_completeness: AnalysisCompleteness,
+}
