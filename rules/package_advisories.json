@@ -9,7 +9,9 @@
     "fixed_version": null,
     "title": "Malicious code injection in flatmap-stream",
     "details": "Known supply chain attack targeting cryptocurrency wallets via event-stream dependency chain.",
-    "cve_id": null
+    "cve_id": null,
+    "provenance": "npm Security Advisory / GHSA-j5rq-g235-9852",
+    "is_synthetic": false
   },
   {
     "id": "CYR-MAL-NPM-002",
@@ -21,7 +23,9 @@
     "fixed_version": "3.3.5",
     "title": "Compromised release of event-stream",
     "details": "Injected malicious flatmap-stream dependency in version 3.3.6.",
-    "cve_id": null
+    "cve_id": null,
+    "provenance": "npm Security Advisory / GHSA-3669-72v9-jh98",
+    "is_synthetic": false
   },
   {
     "id": "CYR-MAL-NPM-003",
@@ -33,7 +37,9 @@
     "fixed_version": "0.7.30",
     "title": "Compromised release containing crypto miner and password stealer",
     "details": "Attackers hijacked maintainer account and published versions containing malware.",
-    "cve_id": null
+    "cve_id": null,
+    "provenance": "GitHub Security Advisory / GHSA-pjwm-rvgw-kg6v",
+    "is_synthetic": false
   },
   {
     "id": "CYR-MAL-NPM-004",
@@ -45,7 +51,9 @@
     "fixed_version": "9.2.1",
     "title": "Malicious file wiping code (peacenotwar)",
     "details": "Maintainer deliberately added code attempting to overwrite files on systems with specific IP geolocation.",
-    "cve_id": null
+    "cve_id": null,
+    "provenance": "Snyk & GHSA-97m3-w2cp-4xx6 Protestware Incident",
+    "is_synthetic": false
   },
   {
     "id": "CYR-MAL-NPM-005",
@@ -57,7 +65,9 @@
     "fixed_version": "1.4.0",
     "title": "Deliberate denial of service loop in colors",
     "details": "Version 1.4.1 contained an intentional infinite loop and corrupted terminal output.",
-    "cve_id": null
+    "cve_id": null,
+    "provenance": "GitHub Security Advisory / GHSA-566m-qj78-phgw",
+    "is_synthetic": false
   },
   {
     "id": "CYR-MAL-NPM-006",
@@ -69,7 +79,9 @@
     "fixed_version": null,
     "title": "Typosquat of cross-env stealing environment variables",
     "details": "Malicious typosquatting package designed to steal local environment variables and secrets.",
-    "cve_id": null
+    "cve_id": null,
+    "provenance": "npm Security Advisory / Typosquatting Exfiltration",
+    "is_synthetic": false
   },
   {
     "id": "CYR-MAL-NPM-007",
@@ -81,7 +93,9 @@
     "fixed_version": null,
     "title": "Typosquat of electron package",
     "details": "Known malicious typosquatting package targeting developers.",
-    "cve_id": null
+    "cve_id": null,
+    "provenance": "npm Security Advisory / Malicious Typosquat",
+    "is_synthetic": false
   },
   {
     "id": "CYR-MAL-PIP-001",
@@ -93,7 +107,9 @@
     "fixed_version": null,
     "title": "Typosquat of requests package executing remote payload",
     "details": "Malicious typosquatting package on PyPI harvesting host credentials.",
-    "cve_id": null
+    "cve_id": null,
+    "provenance": "PyPI Security Advisory / Malicious Wheel Incident",
+    "is_synthetic": false
   },
   {
     "id": "CYR-MAL-PIP-002",
@@ -105,10 +121,12 @@
     "fixed_version": null,
     "title": "Malicious package dropping backdoor payload",
     "details": "Fake colorama update on PyPI dropping reverse shell.",
-    "cve_id": null
+    "cve_id": null,
+    "provenance": "PyPI Security Advisory / Discord Token Grabber",
+    "is_synthetic": false
   },
   {
-    "id": "CYR-MAL-CRATES-001",
+    "id": "CYR-MAL-CARGO-001",
     "ecosystem": "CARGO",
     "package_name": "rust-crypto-wasm",
     "severity": "CRITICAL",
@@ -117,7 +135,9 @@
     "fixed_version": null,
     "title": "Malicious crate exfiltrating SSH keys",
     "details": "Backdoored crate build script attempting exfiltration of private keys during compilation.",
-    "cve_id": null
+    "cve_id": null,
+    "provenance": "RustSec Advisory Database / Crates.io Malware",
+    "is_synthetic": false
   },
   {
     "id": "GHSA-35jh-r3h4-6jhm",
@@ -129,7 +149,9 @@
     "fixed_version": "4.17.21",
     "title": "Command Injection in lodash via template",
     "details": "Vulnerability allows remote attackers to execute arbitrary code via template function.",
-    "cve_id": "CVE-2021-23337"
+    "cve_id": "CVE-2021-23337",
+    "provenance": "NVD & GitHub Security Advisory GHSA-35jh-r3h4-6jhm",
+    "is_synthetic": false
   },
   {
     "id": "GHSA-xvch-5ox4-994h",
@@ -141,7 +163,9 @@
     "fixed_version": "0.2.4",
     "title": "Prototype Pollution in minimist",
     "details": "Prototype pollution vulnerability allows attackers to modify object prototypes.",
-    "cve_id": "CVE-2020-7598"
+    "cve_id": "CVE-2020-7598",
+    "provenance": "NVD & GitHub Security Advisory GHSA-xvch-5ox4-994h",
+    "is_synthetic": false
   },
   {
     "id": "GHSA-5955-9wpr-37jh",
@@ -153,7 +177,9 @@
     "fixed_version": "6.1.9",
     "title": "Arbitrary File Overwrite in tar",
     "details": "Symlink traversal vulnerability allows extraction to overwrite files outside target directory.",
-    "cve_id": "CVE-2021-37701"
+    "cve_id": "CVE-2021-37701",
+    "provenance": "NVD & GitHub Security Advisory GHSA-5955-9wpr-37jh",
+    "is_synthetic": false
   },
   {
     "id": "GHSA-9wx4-h78v-vm56",
@@ -165,7 +191,9 @@
     "fixed_version": "2.31.0",
     "title": "Leak of Proxy-Authorization header on redirect",
     "details": "Requests does not strip Proxy-Authorization header upon cross-origin redirects.",
-    "cve_id": "CVE-2023-32681"
+    "cve_id": "CVE-2023-32681",
+    "provenance": "NVD & GitHub Security Advisory GHSA-9wx4-h78v-vm56",
+    "is_synthetic": false
   },
   {
     "id": "GHSA-m448-cfx5-m92f",
@@ -177,7 +205,9 @@
     "fixed_version": "1.26.17",
     "title": "Cookie leakage via cross-origin redirects in urllib3",
     "details": "Urllib3 does not remove Cookie request header when redirected to another host.",
-    "cve_id": "CVE-2023-43804"
+    "cve_id": "CVE-2023-43804",
+    "provenance": "NVD & GitHub Security Advisory GHSA-m448-cfx5-m92f",
+    "is_synthetic": false
   },
   {
     "id": "RUSTSEC-2022-0052",
@@ -189,6 +219,8 @@
     "fixed_version": "0.9.0",
     "title": "Stack overflow via deeply nested YAML in serde_yaml",
     "details": "Uncontrolled recursion in deserialization leads to stack exhaustion and process crash.",
-    "cve_id": "CVE-2022-31129"
+    "cve_id": "CVE-2022-31129",
+    "provenance": "RustSec Advisory Database RUSTSEC-2022-0052",
+    "is_synthetic": false
   }
 ]

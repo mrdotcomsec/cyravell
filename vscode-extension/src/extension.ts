@@ -195,6 +195,67 @@ export function activate(context: vscode.ExtensionContext) {
     })
   );
 
+  context.subscriptions.push(
+    vscode.commands.registerCommand('cyravell.createBaseline', async () => {
+      try {
+        if (!client || client.getConnectionState() !== 'CONNECTED') {
+          vscode.window.showWarningMessage('Cyravell engine is not connected.');
+          return;
+        }
+
+        const wsFolders = vscode.workspace.workspaceFolders;
+        if (!wsFolders || wsFolders.length === 0) {
+          vscode.window.showWarningMessage('No workspace folder open.');
+          return;
+        }
+
+        const wsPath = wsFolders[0].uri.fsPath;
+        const res = await client.createBaseline(wsPath, undefined, 'VERIFIED_APPROVED');
+        vscode.window.showInformationMessage(
+          `Dependency baseline created for ${res.baseline.ecosystem}: ${res.message} (Fingerprint: ${res.baseline.baseline_fingerprint.substring(0, 12)}...)`
+        );
+        statusProvider.refresh();
+      } catch (e: any) {
+        vscode.window.showErrorMessage(`Failed to create baseline: ${e.message}`);
+      }
+    })
+  );
+
+  context.subscriptions.push(
+    vscode.commands.registerCommand('cyravell.reconcileDrift', async () => {
+      try {
+        if (!client || client.getConnectionState() !== 'CONNECTED') {
+          vscode.window.showWarningMessage('Cyravell engine is not connected.');
+          return;
+        }
+
+        const wsFolders = vscode.workspace.workspaceFolders;
+        if (!wsFolders || wsFolders.length === 0) {
+          vscode.window.showWarningMessage('No workspace folder open.');
+          return;
+        }
+
+        const wsPath = wsFolders[0].uri.fsPath;
+        const res = await client.detectDrift(wsPath, true);
+        const report = res.drift_report;
+        if (report.findings.length === 0) {
+          const bp = report.trusted_baseline_fingerprint || report.current_fingerprint;
+          vscode.window.showInformationMessage(
+            `Workspace dependency check: Clean. Zero drift detected against baseline ${bp.substring(0, 12)}...`
+          );
+        } else {
+          const names = report.findings.map((f) => `${f.package_name} (${f.change_type})`).join(', ');
+          vscode.window.showWarningMessage(
+            `Dependency drift detected! ${report.findings.length} findings: ${names}. Summary: ${report.summary}`
+          );
+        }
+        statusProvider.refresh();
+      } catch (e: any) {
+        vscode.window.showErrorMessage(`Failed to check dependency drift: ${e.message}`);
+      }
+    })
+  );
+
   // Monitor terminal sessions for honest status reporting
   context.subscriptions.push(vscode.window.onDidOpenTerminal(() => statusProvider.refresh()));
   context.subscriptions.push(vscode.window.onDidCloseTerminal(() => statusProvider.refresh()));

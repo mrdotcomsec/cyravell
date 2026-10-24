@@ -38,9 +38,9 @@ export class StatusViewProvider implements vscode.TreeDataProvider<StatusItem> {
     return element;
   }
 
-  getChildren(element?: StatusItem): Thenable<StatusItem[]> {
+  async getChildren(element?: StatusItem): Promise<StatusItem[]> {
     if (element) {
-      return Promise.resolve([]);
+      return [];
     }
 
     const state = this.client.getConnectionState();
@@ -173,7 +173,68 @@ export class StatusViewProvider implements vscode.TreeDataProvider<StatusItem> {
       );
     }
 
-    return Promise.resolve(items);
+    // Workspace Dependency Baseline & Drift Status
+    const wsFolders = vscode.workspace.workspaceFolders;
+    if (state === 'CONNECTED' && wsFolders && wsFolders.length > 0) {
+      const wsPath = wsFolders[0].uri.fsPath;
+      try {
+        const baselineInfo = await this.client.getBaseline(wsPath);
+        if (baselineInfo.baseline) {
+          const b = baselineInfo.baseline;
+          const pkgCount = Object.keys(b.direct_dependencies || {}).length;
+          items.push(
+            new StatusItem(
+              'Dependency Baseline',
+              `${b.ecosystem} (${b.trust_state})`,
+              vscode.TreeItemCollapsibleState.None,
+              'package',
+              `Baseline Fingerprint: ${b.baseline_fingerprint}\nDirect: ${pkgCount}\nManifest Fingerprint: ${b.manifest_fingerprint || 'none'}\nCreated: ${b.created_at}`
+            )
+          );
+        } else {
+          items.push(
+            new StatusItem(
+              'Dependency Baseline',
+              'None (Unbaselined)',
+              vscode.TreeItemCollapsibleState.None,
+              'info',
+              'No dependency baseline recorded for this workspace. Run "Cyravell: Create Dependency Baseline" to snapshot.'
+            )
+          );
+        }
+
+        if (baselineInfo.active_drift) {
+          const drift = baselineInfo.active_drift;
+          if (drift.findings && drift.findings.length > 0) {
+            const hasMalicious = drift.findings.some((f) => f.change_type === 'MALICIOUS_PACKAGE_DETECTED' || f.is_malicious);
+            const icon = hasMalicious ? 'error' : 'warning';
+            items.push(
+              new StatusItem(
+                'Dependency Drift',
+                `${drift.findings.length} findings`,
+                vscode.TreeItemCollapsibleState.None,
+                icon,
+                `Drift detected:\n${drift.findings.map((f) => `- [${f.severity}] ${f.package_name}: ${f.change_type} - ${f.evidence.join('; ')}`).join('\n')}`
+              )
+            );
+          } else {
+            items.push(
+              new StatusItem(
+                'Dependency Drift',
+                'Clean (No Drift)',
+                vscode.TreeItemCollapsibleState.None,
+                'pass',
+                'No active dependency drift detected in workspace.'
+              )
+            );
+          }
+        }
+      } catch (err: any) {
+        // Safe degrade if baseline fetch fails
+      }
+    }
+
+    return items;
   }
 }
 

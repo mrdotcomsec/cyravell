@@ -318,4 +318,50 @@ cargo run --bin cyravell-test-harness -- test-package-gate
   - **Cause:** A dependency was added to `package.json` or `Cargo.toml` manually without updating the corresponding lockfile.
   - **Resolution:** Run the appropriate lockfile update command (e.g. `npm install --package-lock-only` or `cargo check`) under developer review.
 
+---
+
+## 11. Post-Installation Verification & Dependency-Drift Monitoring (Phase 2.6)
+
+### 11.1 Establishing and Inspecting Baselines
+A dependency baseline records a canonical snapshot of a project's dependency topology, manifest hashes, and lockfile integrity attributes.
+
+#### Using VS Code
+1. Open the Command Palette (`Ctrl+Shift+P` / `Cmd+Shift+P`).
+2. Run `Cyravell: Create Dependency Baseline`.
+3. Check the **Cyravell Engine Status** panel under **Dependency Baseline** to view the ecosystem, trust state, and fingerprint.
+
+#### Using IPC / CLI
+```bash
+# Snapshot a baseline via test harness or IPC
+cargo run --bin cyravell-test-harness -- test-drift-monitor
+```
+
+### 11.2 Checking for Dependency Drift
+To verify current workspace dependencies against the trusted baseline:
+1. In VS Code, run `Cyravell: Check Dependency Drift` from the Command Palette.
+2. If drift is detected, a notification lists the affected packages and severities, and the status item updates to show finding counts.
+
+### 11.3 Running Phase 2.6 Tests
+```bash
+# Run unit and subsystem drift & baselining tests (20 dedicated tests)
+cargo test --lib package::drift_tests -- --nocapture
+
+# Run the live IPC drift monitoring test suite
+cargo run --bin cyravell-test-harness -- test-drift-monitor
+
+# Run full end-to-end pipeline
+./scripts/test.sh
+```
+
+### 11.4 Troubleshooting Baseline & Drift Errors
+- **Error: `Execution gate blocked: workspace has active malicious dependency drift` (-32006 / exit 126):**
+  - **Cause:** A confirmed malicious package (e.g. `flatmap-stream`) was detected in the active workspace files during background monitoring or post-operation verification.
+  - **Resolution:** Remove the malicious dependency from `package.json` and lockfiles. Then run `Cyravell: Check Dependency Drift` to reconcile the workspace back to a clean state.
+- **Error: `Cannot replace VerifiedApproved baseline with unverified state without explicit approval`:**
+  - **Cause:** An automatic background event attempted to downgrade or overwrite an approved baseline with an unreviewed snapshot (`UNVERIFIED_INITIAL` or `REVIEW_REQUIRED`).
+  - **Resolution:** The engine's trust boundary invariant prevents unverified changes from erasing verified baselines. Explicitly trigger a baseline creation or approve the drift report after verifying the dependencies.
+- **Notice: `Observed via local filesystem reconciliation (unattributed background change)` in Audit Logs:**
+  - **Explanation:** Filesystem monitoring detects *that* a manifest or lockfile was modified, but does not fabricate false attribution to a process without an active controlled terminal context. This is expected behavior and upholds Cyravell's attribution honesty principle.
+
+
 

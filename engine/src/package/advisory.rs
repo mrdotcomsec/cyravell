@@ -3,6 +3,7 @@
 
 use crate::model::{PackageEcosystem, Severity};
 use serde::{Deserialize, Serialize};
+use sha2::{Digest, Sha256};
 use std::cmp::Ordering;
 use std::path::Path;
 
@@ -18,6 +19,14 @@ pub struct AdvisoryRecord {
     pub title: String,
     pub details: String,
     pub cve_id: Option<String>,
+    #[serde(default = "default_provenance")]
+    pub provenance: Option<String>,
+    #[serde(default)]
+    pub is_synthetic: bool,
+}
+
+fn default_provenance() -> Option<String> {
+    Some("Curated Local Intelligence".to_string())
 }
 
 #[derive(Debug)]
@@ -105,6 +114,53 @@ impl AdvisoryDatabase {
 
     pub fn all_advisories(&self) -> &[AdvisoryRecord] {
         &self.advisories
+    }
+
+    pub fn production_advisories(&self) -> Vec<&AdvisoryRecord> {
+        self.advisories.iter().filter(|a| !a.is_synthetic).collect()
+    }
+
+    pub fn synthetic_advisories(&self) -> Vec<&AdvisoryRecord> {
+        self.advisories.iter().filter(|a| a.is_synthetic).collect()
+    }
+
+    pub fn fingerprint(&self) -> String {
+        let mut hasher = Sha256::new();
+        for adv in &self.advisories {
+            hasher.update(adv.id.as_bytes());
+            hasher.update(adv.package_name.as_bytes());
+            hasher.update(adv.affected_range.as_bytes());
+            if let Some(ref prov) = adv.provenance {
+                hasher.update(prov.as_bytes());
+            }
+            if adv.is_synthetic {
+                hasher.update(b"synthetic");
+            }
+        }
+        format!("{:x}", hasher.finalize())
+    }
+
+    pub fn validate_record(&self, record: &AdvisoryRecord) -> Result<(), String> {
+        if record.id.trim().is_empty() {
+            return Err("Advisory ID cannot be empty".to_string());
+        }
+        if record.package_name.trim().is_empty()
+            || record.package_name.contains(char::is_whitespace)
+        {
+            return Err(format!("Invalid package name: '{}'", record.package_name));
+        }
+        if record.affected_range.trim().is_empty() {
+            return Err("Affected range cannot be empty".to_string());
+        }
+        if record
+            .provenance
+            .as_ref()
+            .map(|p| p.trim().is_empty())
+            .unwrap_or(true)
+        {
+            return Err(format!("Missing provenance for advisory '{}'", record.id));
+        }
+        Ok(())
     }
 
     pub fn source_name(&self) -> &str {

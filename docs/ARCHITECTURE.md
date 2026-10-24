@@ -320,4 +320,106 @@ Package Manager Command (e.g. npm install flatmap-stream@0.1.1)
 ### 9.4 TOCTOU Protection
 When an approval request is generated for a package operation requiring review, Cyravell computes and binds a SHA-256 `manifest_fingerprint` across the project manifest and lockfile. At the moment of `dispatch_authorized`, the gate re-evaluates the fingerprint: if project files were modified between approval and dispatch, the request is rejected immediately (`ApprovalError::InvalidStateTransition`).
 
+---
+
+## 10. Post-Installation Package Integrity & Dependency-Drift Monitoring (Phase 2.6)
+
+### 10.1 System Overview
+Phase 2.6 extends Cyravell from pre-installation gate checks to continuous post-installation verification, dependency-state baselining, and local drift detection (`engine/src/package/`). It establishes an authoritative local baseline of project dependencies, verifies project integrity immediately after controlled package operations, and continuously monitors the workspace for stealth modifications or background tampering.
+
+```
+                    Controlled Package Operation Dispatched (Phase 2.5)
+                                          │
+                                          ▼
+                                   Backend Execution
+                                          │
+                        ┌─────────────────┴─────────────────┐
+                        ▼                                   ▼
+             Exit Code != 0                       Exit Code == 0
+                   │                                       │
+                   ▼                                       ▼
+    PostOperationVerification:             PostOperationVerification:
+    Status: EXECUTION_FAILED               - Computes Post-Op Baseline
+    - Preserves Pre-Op Baseline            - Compares against Pre-Op State
+    - Does NOT record success              - Checks Manifest/Lockfile Consistency
+    - Audit Trail: Recorded                - Runs Local Advisory Inspection
+                                                           │
+                                                           ▼
+                                            Verification Outcome:
+                                            ├── Clean Changes ──► Status: VERIFIED
+                                            ├── Unmatched ─────► Status: UNEXPECTED_CHANGES
+                                            ├── Malicious ─────► Status: ASSESSMENT_FAILED
+                                            └── Corrupted ─────► Status: INCONCLUSIVE
+                                                           │
+                                                           ▼
+                                            Baseline Trust State Transition
+                                            (POST_OPERATION_OBSERVED or REVIEW_REQUIRED)
+```
+
+### 10.2 Deterministic Baseline Model & Invariant Trust Boundaries
+A `DependencyBaseline` captures the complete dependency topology of a workspace:
+- **Ecosystem & Package Manager:** Detected ecosystem (`npm`, `pnpm`, `yarn`, `pip`, `cargo`).
+- **Canonical Dependency Sets:** Direct, resolved, and transitive dependencies stored in canonical `BTreeMap` key order.
+- **Integrity Metadata:** Cryptographic hashes of lockfiles and package integrity checksums.
+- **Deterministic Baseline Fingerprint:** SHA-256 digest computed across canonical dependency sets, manifest fingerprints, and lockfile hashes. Volatile fields (such as `created_at` timestamps) are strictly excluded so identical project configurations yield identical digests across time and machines.
+
+#### Baseline Trust States
+The baseline lifecycle is governed by a four-tier trust model (`BaselineTrust`):
+1. **`VERIFIED_APPROVED`:** Explicitly reviewed and approved by the developer or created through an authorized, clean, verified package operation.
+2. **`POST_OPERATION_OBSERVED`:** Captured automatically after an authorized controlled package operation with clean verification.
+3. **`REVIEW_REQUIRED`:** Captured after an operation or background change with unexpected modifications, unverified dependencies, or advisory warnings.
+4. **`UNVERIFIED_INITIAL`:** Initial automatic baseline snapshot before developer review.
+
+#### Trust Invariant Boundary
+The `BaselineStore` enforces a strict trust boundary:
+- An unverified snapshot (`UNVERIFIED_INITIAL` or `REVIEW_REQUIRED`) **cannot** overwrite or downgrade an existing `VERIFIED_APPROVED` baseline without explicit developer approval.
+- Attempts to overwrite a verified baseline without approval fail deterministically (`attempt_replace_baseline(..., false)` returns `false`), preserving audit integrity.
+
+### 10.3 Post-Operation Verification
+Package manager exit codes are inherently untrusted indicators of project safety: an installer that successfully pulls a malicious dependency exits with code `0`. Cyravell's `PostOperationVerifier` performs deterministic post-execution verification:
+1. **Execution Failure Handling:** If `exit_code != 0`, immediately records `EXECUTION_FAILED`, retains pre-operation baseline, and records audit trail.
+2. **Post-Op Snapshot Comparison:** Captures post-operation dependency state and diffs against the pre-operation baseline.
+3. **Advisory Database Scrutiny:** Re-evaluates all newly introduced direct and transitive dependencies against the offline advisory database.
+4. **Verification Statuses:**
+   - `VERIFIED`: Operation completed cleanly, expected dependencies installed, zero advisories.
+   - `UNEXPECTED_CHANGES`: Dependencies modified beyond the scope of the issued command.
+   - `ASSESSMENT_FAILED`: Malicious packages or critical vulnerabilities introduced.
+   - `INCONCLUSIVE`: Manifest or lockfile unparseable or corrupted.
+
+### 10.4 Deterministic Drift Detection
+The `DriftDetector` evaluates current workspace state against the active baseline, classifying changes into 10 deterministic drift types:
+1. `UnexpectedAddition`: Dependency added without a corresponding recorded operation.
+2. `VersionDrift`: Installed or resolved dependency version differs from baseline.
+3. `UnexpectedRemoval`: Previously baseline-recorded dependency was deleted.
+4. `TransitiveDrift`: Transitive dependency modified while direct dependencies appear unchanged.
+5. `LockfileOnlyDrift`: Lockfile modified without manifest modification.
+6. `ManifestOnlyDrift`: Manifest modified without corresponding lockfile update.
+7. `IntegrityDrift`: Lockfile checksums or hash integrity attributes changed.
+8. `MaliciousPackageDetected`: Known malicious package found in active project state.
+9. `VulnerabilityDetected`: Package matching known security vulnerability introduced.
+10. `MetadataCorrupted`: Malformed, unparseable, or truncated manifest/lockfile detected.
+
+### 10.5 Active Gate Hard-Block Enforcement
+Active dependency drift directly impacts subsequent command dispatch at the authoritative execution gate:
+- **Active Malicious Drift:** If a workspace contains an unaddressed `MaliciousPackageDetected` finding, all subsequent command execution requests in that workspace are **hard-blocked** (`GateDecision::Deny`, non-overridable, exit code 126).
+- **Active Vulnerability Drift:** If a workspace contains high-severity vulnerability drift, subsequent command execution requests require developer approval.
+- **Fail-Closed:** The gate checks active workspace drift synchronously during `evaluate_with_session`.
+
+### 10.6 Bounded Local Workspace Monitoring
+The `WorkspaceMonitor` provides continuous, resource-bounded observation of project manifest and lockfile changes:
+- **Bounded Target List:** Monitors only authoritative project definition files (`package.json`, `package-lock.json`, `Cargo.toml`, `Cargo.lock`, `requirements.txt`, etc.).
+- **Deduplication:** Debounces rapid successive disk events using a thread-safe timestamp and hash cache.
+- **Atomic Write Reconciliation:** Gracefully reconciles atomic replacement patterns (write to temp file, rename over target) common in package managers and editors.
+- **Clean Shutdown:** Monitors run as bounded background workers that terminate cleanly when the engine shuts down.
+
+### 10.7 Advisory Provenance & Synthetic Isolation
+- All advisory records (`AdvisoryRecord`) include a mandatory `provenance` string indicating source origin.
+- Advisories support an explicit `is_synthetic: bool` flag to cleanly partition synthetic test fixtures from production vulnerability data.
+- Manifest signatures (`rules/cyravell_manifest.json`) cryptographically bind the advisory database to the engine binary.
+
+### 10.8 Attribution Transparency & Credential Redaction
+- **Honest Attribution:** Filesystem monitoring detects *that* files changed, but cannot authoritatively prove *which* process modified them without a synchronized execution context. Cyravell explicitly labels background reconciliation events as `"Observed via local filesystem reconciliation (unattributed background change)"`.
+- **Credential Redaction:** The engine analyzer and audit logger scrub secret tokens, password flags (`--password=`, `token=`), and URL userinfo credentials (`https://user:secret@registry.npmjs.org/`) before persisting audit records or presenting notifications.
+
+
 

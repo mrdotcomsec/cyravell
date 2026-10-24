@@ -227,6 +227,32 @@ pub fn redact_command(command: &str) -> String {
         }
     }
 
+    // Redact URL userinfo credentials: "://user:secret@host" -> "://user:[REDACTED]@host"
+    let mut url_idx = 0;
+    while let Some(proto_offset) = sanitized[url_idx..].find("://") {
+        let proto_idx = url_idx + proto_offset;
+        let cred_start = proto_idx + 3;
+        let url_end = sanitized[cred_start..]
+            .find(|c: char| c.is_whitespace() || c == '/' || c == '"' || c == '\'')
+            .map(|e| cred_start + e)
+            .unwrap_or(sanitized.len());
+
+        if let Some(at_offset) = sanitized[cred_start..url_end].find('@') {
+            let at_idx = cred_start + at_offset;
+            if let Some(colon_offset) = sanitized[cred_start..at_idx].find(':') {
+                let secret_start = cred_start + colon_offset + 1;
+                if at_idx > secret_start {
+                    sanitized.replace_range(secret_start..at_idx, "[REDACTED]");
+                }
+            }
+        }
+
+        url_idx = cred_start + 10;
+        if url_idx >= sanitized.len() {
+            break;
+        }
+    }
+
     sanitized
 }
 

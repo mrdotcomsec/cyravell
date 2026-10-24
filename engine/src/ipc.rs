@@ -15,7 +15,10 @@ use crate::gate::approval::ApprovalManager;
 use crate::gate::backend::{ExecutionBackend, OsExecutionBackend};
 use crate::integrity::{verify_manifest, IntegrityStatus};
 use crate::model::*;
-use crate::package::{summarize_assessment, PackageSecurityAssessor};
+use crate::package::{
+    create_workspace_baseline, detect_package_command_from_raw, summarize_assessment,
+    BaselineStore, DriftDetector, PackageSecurityAssessor, PostOperationVerifier, WorkspaceMonitor,
+};
 use crate::policy::PolicyEngine;
 
 pub struct EngineState {
@@ -27,6 +30,8 @@ pub struct EngineState {
     pub approval_manager: Arc<ApprovalManager>,
     pub package_assessor: Arc<PackageSecurityAssessor>,
     pub backend: Arc<dyn ExecutionBackend>,
+    pub baseline_store: Arc<BaselineStore>,
+    pub workspace_monitor: Arc<WorkspaceMonitor>,
     pub manifest_path: Option<PathBuf>,
     pub base_dir: PathBuf,
     pub shutdown_requested: AtomicBool,
@@ -77,6 +82,8 @@ impl IpcServer {
             approval_manager,
             package_assessor: Arc::new(PackageSecurityAssessor::default()),
             backend,
+            baseline_store: Arc::new(BaselineStore::default()),
+            workspace_monitor: Arc::new(WorkspaceMonitor::default()),
             manifest_path,
             base_dir,
             shutdown_requested: AtomicBool::new(false),
@@ -231,6 +238,8 @@ fn dispatch_request(req: JsonRpcRequest, state: &Arc<EngineState>) -> JsonRpcRes
                     "audit_verification".to_string(),
                     "integrity_check".to_string(),
                     "execution_gate".to_string(),
+                    "dependency_baselining".to_string(),
+                    "drift_monitoring".to_string(),
                 ],
             };
             JsonRpcResponse::success(id, serde_json::to_value(res).unwrap())
@@ -415,6 +424,61 @@ fn dispatch_request(req: JsonRpcRequest, state: &Arc<EngineState>) -> JsonRpcRes
                 .as_deref()
                 .map(Path::new)
                 .unwrap_or_else(|| Path::new("."));
+
+            // 2.4. Active Workspace Dependency Drift Hard-Block Guard
+            if let Some(drift) = state.baseline_store.get_drift_report(working_path) {
+                if let Some(mal_finding) = drift.findings.iter().find(|f| f.is_malicious) {
+                    let risk = RiskAssessment {
+                        severity: Severity::Critical,
+                        confidence: Confidence::High,
+                        rule_id: "RULE-DRIFT-MALICIOUS".to_string(),
+                        reason: format!(
+                            "Blocked: Workspace dependency drift contains confirmed malicious package '{}'",
+                            mal_finding.package_name
+                        ),
+                        evidence: mal_finding.evidence.clone(),
+                        recommended_action: "BLOCK_AND_ALERT".to_string(),
+                        evaluated_at: chrono::Utc::now(),
+                        matched_rules: mal_finding.applicable_rules.clone(),
+                        potential_impact: Some(
+                            "Supply chain malware presence detected in project dependency state".to_string(),
+                        ),
+                        analysis_completeness: AnalysisCompleteness::Complete,
+                        analysis_details: None,
+                    };
+
+                    let (seq, hash) = match state.audit.append(
+                        &format!("gate-{}", uuid::Uuid::new_v4()),
+                        "GATE_BlockedByPolicy",
+                        &format!(
+                            "Command: {}, Blocked: Workspace contains malicious package '{}'",
+                            sanitized, mal_finding.package_name
+                        ),
+                        Severity::Critical,
+                    ) {
+                        Ok(rec) => (Some(rec.sequence_number), Some(rec.current_record_hash)),
+                        Err(_) => (None, None),
+                    };
+
+                    let res = GateEvaluateResult {
+                        decision: GateDecision::Block,
+                        outcome: ExecutionOutcome::BlockedByPolicy,
+                        risk_assessment: risk,
+                        analysis_completeness: AnalysisCompleteness::Complete,
+                        request_id: None,
+                        session_id: eval_params.session_id.clone(),
+                        audit_sequence: seq,
+                        audit_record_hash: hash,
+                        reason: format!(
+                            "Blocked: Workspace contains confirmed malicious package '{}' (dependency drift)",
+                            mal_finding.package_name
+                        ),
+                        allow_dispatch: false,
+                        package_assessment: None,
+                    };
+                    return JsonRpcResponse::success(id, serde_json::to_value(res).unwrap());
+                }
+            }
 
             let mut attached_package_assessment = None;
             if state.package_assessor.config().enabled {
@@ -961,6 +1025,52 @@ fn dispatch_request(req: JsonRpcRequest, state: &Arc<EngineState>) -> JsonRpcRes
                 severity,
             ) {
                 Ok(rec) => {
+                    // Post-operation verification for package operations
+                    if let Some(ref dir_str) = record_params.working_directory {
+                        let working_dir = Path::new(dir_str);
+                        if detect_package_command_from_raw(&record_params.command).is_some() {
+                            let pre_baseline = state.baseline_store.get_baseline(working_dir);
+                            let post_res = PostOperationVerifier::verify(
+                                working_dir,
+                                &record_params.command,
+                                record_params.exit_code,
+                                pre_baseline.as_ref(),
+                                state.package_assessor.advisory_db(),
+                            );
+                            if let Some(ref drift) = post_res.drift_report {
+                                state
+                                    .baseline_store
+                                    .set_drift_report(working_dir, drift.clone());
+                            }
+                            let post_action = "POST_OPERATION_VERIFICATION";
+                            let post_detail = format!(
+                                "Command: {}, ProcessOutcome: {:?}, VerificationStatus: {:?}, PreFingerprint: {:?}, PostFingerprint: {:?}",
+                                sanitized,
+                                post_res.process_outcome,
+                                post_res.verification_status,
+                                post_res.pre_operation_fingerprint,
+                                post_res.post_operation_fingerprint
+                            );
+                            let post_sev = match post_res.verification_status {
+                                PostOperationVerificationStatus::Verified => Severity::Low,
+                                PostOperationVerificationStatus::UnexpectedChanges => {
+                                    Severity::High
+                                }
+                                PostOperationVerificationStatus::AssessmentFailed => Severity::High,
+                                PostOperationVerificationStatus::ExecutionFailed => {
+                                    Severity::Medium
+                                }
+                                PostOperationVerificationStatus::Inconclusive => Severity::Low,
+                            };
+                            let _ = state.audit.append(
+                                &format!("post-verify-{}", uuid::Uuid::new_v4()),
+                                post_action,
+                                &post_detail,
+                                post_sev,
+                            );
+                        }
+                    }
+
                     let res = GateRecordOutcomeResult {
                         recorded: true,
                         audit_sequence: rec.sequence_number,
@@ -1246,6 +1356,47 @@ fn dispatch_request(req: JsonRpcRequest, state: &Arc<EngineState>) -> JsonRpcRes
                 Err(_) => (0, "UNRECORDED".to_string()),
             };
 
+            // Post-operation verification for package operations
+            if let Some(working_dir) = working_path {
+                if detect_package_command_from_raw(&dispatch_params.command).is_some() {
+                    let pre_baseline = state.baseline_store.get_baseline(working_dir);
+                    let post_res = PostOperationVerifier::verify(
+                        working_dir,
+                        &dispatch_params.command,
+                        exit_code,
+                        pre_baseline.as_ref(),
+                        state.package_assessor.advisory_db(),
+                    );
+                    if let Some(ref drift) = post_res.drift_report {
+                        state
+                            .baseline_store
+                            .set_drift_report(working_dir, drift.clone());
+                    }
+                    let post_action = "POST_OPERATION_VERIFICATION";
+                    let post_detail = format!(
+                        "Command: {}, ProcessOutcome: {:?}, VerificationStatus: {:?}, PreFingerprint: {:?}, PostFingerprint: {:?}",
+                        sanitized,
+                        post_res.process_outcome,
+                        post_res.verification_status,
+                        post_res.pre_operation_fingerprint,
+                        post_res.post_operation_fingerprint
+                    );
+                    let post_sev = match post_res.verification_status {
+                        PostOperationVerificationStatus::Verified => Severity::Low,
+                        PostOperationVerificationStatus::UnexpectedChanges => Severity::High,
+                        PostOperationVerificationStatus::AssessmentFailed => Severity::High,
+                        PostOperationVerificationStatus::ExecutionFailed => Severity::Medium,
+                        PostOperationVerificationStatus::Inconclusive => Severity::Low,
+                    };
+                    let _ = state.audit.append(
+                        &format!("post-verify-{}", uuid::Uuid::new_v4()),
+                        post_action,
+                        &post_detail,
+                        post_sev,
+                    );
+                }
+            }
+
             let res = GateDispatchAuthorizedResult {
                 request_id: dispatch_params.request_id,
                 dispatched,
@@ -1400,6 +1551,366 @@ fn dispatch_request(req: JsonRpcRequest, state: &Arc<EngineState>) -> JsonRpcRes
         "audit.verify" => {
             let verify_res = state.audit.verify();
             JsonRpcResponse::success(id, serde_json::to_value(verify_res).unwrap())
+        }
+
+        "package.create_baseline" => {
+            let params = match req.params {
+                Some(p) => p,
+                None => {
+                    return JsonRpcResponse::error(
+                        id,
+                        -32602,
+                        "Missing params for package.create_baseline".to_string(),
+                        None,
+                    )
+                }
+            };
+
+            let create_params: PackageCreateBaselineParams = match serde_json::from_value(params) {
+                Ok(p) => p,
+                Err(e) => {
+                    return JsonRpcResponse::error(
+                        id,
+                        -32602,
+                        "Invalid package.create_baseline params format".to_string(),
+                        Some(e.to_string()),
+                    )
+                }
+            };
+
+            let path = Path::new(&create_params.workspace_path);
+            let reason = create_params
+                .reason
+                .unwrap_or(SnapshotReason::InitialBaseline);
+            let trust = create_params
+                .trust_state
+                .unwrap_or(BaselineTrust::VerifiedApproved);
+
+            match create_workspace_baseline(
+                path,
+                create_params.ecosystem,
+                reason,
+                trust,
+                state.package_assessor.advisory_db(),
+            ) {
+                Ok(baseline) => {
+                    state.baseline_store.set_baseline(path, baseline.clone());
+                    let _ = state.audit.append(
+                        &format!("base-create-{}", uuid::Uuid::new_v4()),
+                        "BASELINE_CREATED",
+                        &format!(
+                            "Workspace: {}, Fingerprint: {}, Trust: {:?}",
+                            path.display(),
+                            baseline.baseline_fingerprint,
+                            baseline.trust_state
+                        ),
+                        Severity::Low,
+                    );
+
+                    let res = PackageCreateBaselineResult {
+                        baseline,
+                        message: "Baseline snapshot created and recorded successfully".to_string(),
+                    };
+                    JsonRpcResponse::success(id, serde_json::to_value(res).unwrap())
+                }
+                Err(e) => JsonRpcResponse::error(
+                    id,
+                    -32001,
+                    format!("Failed to create dependency baseline: {}", e),
+                    None,
+                ),
+            }
+        }
+
+        "package.get_baseline" => {
+            let params = match req.params {
+                Some(p) => p,
+                None => {
+                    return JsonRpcResponse::error(
+                        id,
+                        -32602,
+                        "Missing params for package.get_baseline".to_string(),
+                        None,
+                    )
+                }
+            };
+
+            let get_params: PackageGetBaselineParams = match serde_json::from_value(params) {
+                Ok(p) => p,
+                Err(e) => {
+                    return JsonRpcResponse::error(
+                        id,
+                        -32602,
+                        "Invalid package.get_baseline params format".to_string(),
+                        Some(e.to_string()),
+                    )
+                }
+            };
+
+            let path = Path::new(&get_params.workspace_path);
+            let baseline = state.baseline_store.get_baseline(path);
+            let active_drift = state.baseline_store.get_drift_report(path);
+
+            let res = PackageGetBaselineResult {
+                baseline,
+                active_drift,
+            };
+            JsonRpcResponse::success(id, serde_json::to_value(res).unwrap())
+        }
+
+        "package.detect_drift" => {
+            let params = match req.params {
+                Some(p) => p,
+                None => {
+                    return JsonRpcResponse::error(
+                        id,
+                        -32602,
+                        "Missing params for package.detect_drift".to_string(),
+                        None,
+                    )
+                }
+            };
+
+            let drift_params: PackageDetectDriftParams = match serde_json::from_value(params) {
+                Ok(p) => p,
+                Err(e) => {
+                    return JsonRpcResponse::error(
+                        id,
+                        -32602,
+                        "Invalid package.detect_drift params format".to_string(),
+                        Some(e.to_string()),
+                    )
+                }
+            };
+
+            let path = Path::new(&drift_params.workspace_path);
+            if drift_params.reconcile {
+                match state.workspace_monitor.reconcile_workspace(
+                    path,
+                    &state.baseline_store,
+                    state.package_assessor.advisory_db(),
+                    Some(&state.audit),
+                ) {
+                    Ok(Some(report)) => {
+                        let trust = state
+                            .baseline_store
+                            .get_baseline(path)
+                            .map(|b| b.trust_state);
+                        let res = PackageDetectDriftResult {
+                            drift_report: report,
+                            baseline_trust: trust,
+                        };
+                        JsonRpcResponse::success(id, serde_json::to_value(res).unwrap())
+                    }
+                    Ok(None) => {
+                        let empty_report = DriftReport {
+                            workspace_path: path.display().to_string(),
+                            ecosystem: PackageEcosystem::Npm,
+                            trusted_baseline_fingerprint: None,
+                            current_fingerprint: "NO_BASELINE".to_string(),
+                            has_drift: false,
+                            findings: vec![],
+                            evaluated_at: chrono::Utc::now(),
+                            summary: "Workspace reconciled; no drift detected".to_string(),
+                        };
+                        let trust = state
+                            .baseline_store
+                            .get_baseline(path)
+                            .map(|b| b.trust_state);
+                        let res = PackageDetectDriftResult {
+                            drift_report: empty_report,
+                            baseline_trust: trust,
+                        };
+                        JsonRpcResponse::success(id, serde_json::to_value(res).unwrap())
+                    }
+                    Err(e) => JsonRpcResponse::error(
+                        id,
+                        -32001,
+                        format!("Reconciliation error: {}", e),
+                        None,
+                    ),
+                }
+            } else {
+                let trusted = match state.baseline_store.get_baseline(path) {
+                    Some(b) => b,
+                    None => {
+                        return JsonRpcResponse::error(
+                            id,
+                            -32001,
+                            "No baseline found for workspace; call package.create_baseline first"
+                                .to_string(),
+                            None,
+                        );
+                    }
+                };
+
+                match create_workspace_baseline(
+                    path,
+                    Some(trusted.ecosystem),
+                    SnapshotReason::ManualInspection,
+                    BaselineTrust::PostOperationObserved,
+                    state.package_assessor.advisory_db(),
+                ) {
+                    Ok(current) => {
+                        let report = DriftDetector::detect(
+                            &trusted,
+                            &current,
+                            state.package_assessor.advisory_db(),
+                        );
+                        state.baseline_store.set_drift_report(path, report.clone());
+                        let res = PackageDetectDriftResult {
+                            drift_report: report,
+                            baseline_trust: Some(trusted.trust_state),
+                        };
+                        JsonRpcResponse::success(id, serde_json::to_value(res).unwrap())
+                    }
+                    Err(e) => {
+                        let report = DriftDetector::for_corrupted_metadata(
+                            &path.display().to_string(),
+                            trusted.ecosystem,
+                            &e.to_string(),
+                        );
+                        state.baseline_store.set_drift_report(path, report.clone());
+                        let res = PackageDetectDriftResult {
+                            drift_report: report,
+                            baseline_trust: Some(trusted.trust_state),
+                        };
+                        JsonRpcResponse::success(id, serde_json::to_value(res).unwrap())
+                    }
+                }
+            }
+        }
+
+        "package.verify_post_operation" => {
+            let params = match req.params {
+                Some(p) => p,
+                None => {
+                    return JsonRpcResponse::error(
+                        id,
+                        -32602,
+                        "Missing params for package.verify_post_operation".to_string(),
+                        None,
+                    )
+                }
+            };
+
+            let v_params: PackageVerifyPostOperationParams = match serde_json::from_value(params) {
+                Ok(p) => p,
+                Err(e) => {
+                    return JsonRpcResponse::error(
+                        id,
+                        -32602,
+                        "Invalid package.verify_post_operation params format".to_string(),
+                        Some(e.to_string()),
+                    )
+                }
+            };
+
+            let path = Path::new(&v_params.workspace_path);
+            let pre_baseline = state.baseline_store.get_baseline(path);
+            let verify_res = PostOperationVerifier::verify(
+                path,
+                &v_params.command,
+                Some(v_params.exit_code),
+                pre_baseline.as_ref(),
+                state.package_assessor.advisory_db(),
+            );
+
+            if let Some(ref drift) = verify_res.drift_report {
+                state.baseline_store.set_drift_report(path, drift.clone());
+            }
+
+            let sanitized = crate::analysis::redact_command(&v_params.command);
+            let detail = format!(
+                "Command: {}, ProcessOutcome: {:?}, VerificationStatus: {:?}, PreFingerprint: {:?}, PostFingerprint: {:?}",
+                sanitized,
+                verify_res.process_outcome,
+                verify_res.verification_status,
+                verify_res.pre_operation_fingerprint,
+                verify_res.post_operation_fingerprint
+            );
+            let sev = match verify_res.verification_status {
+                PostOperationVerificationStatus::Verified => Severity::Low,
+                PostOperationVerificationStatus::UnexpectedChanges => Severity::High,
+                PostOperationVerificationStatus::AssessmentFailed => Severity::High,
+                PostOperationVerificationStatus::ExecutionFailed => Severity::Medium,
+                PostOperationVerificationStatus::Inconclusive => Severity::Low,
+            };
+
+            let (seq, hash) = match state.audit.append(
+                &format!("post-verify-{}", uuid::Uuid::new_v4()),
+                "POST_OPERATION_VERIFICATION",
+                &detail,
+                sev,
+            ) {
+                Ok(rec) => (rec.sequence_number, rec.current_record_hash),
+                Err(_) => (0, "UNRECORDED".to_string()),
+            };
+
+            let res = PackageVerifyPostOperationResult {
+                verification: verify_res,
+                audit_sequence: seq,
+                audit_record_hash: hash,
+            };
+            JsonRpcResponse::success(id, serde_json::to_value(res).unwrap())
+        }
+
+        "package.monitor_workspace" => {
+            let params = match req.params {
+                Some(p) => p,
+                None => {
+                    return JsonRpcResponse::error(
+                        id,
+                        -32602,
+                        "Missing params for package.monitor_workspace".to_string(),
+                        None,
+                    )
+                }
+            };
+
+            let m_params: PackageMonitorWorkspaceParams = match serde_json::from_value(params) {
+                Ok(p) => p,
+                Err(e) => {
+                    return JsonRpcResponse::error(
+                        id,
+                        -32602,
+                        "Invalid package.monitor_workspace params format".to_string(),
+                        Some(e.to_string()),
+                    )
+                }
+            };
+
+            let path = Path::new(&m_params.workspace_path);
+            if m_params.register {
+                let active_files = state.workspace_monitor.register_workspace(path);
+                if state.baseline_store.get_baseline(path).is_none() {
+                    if let Ok(initial) = create_workspace_baseline(
+                        path,
+                        None,
+                        SnapshotReason::InitialBaseline,
+                        BaselineTrust::UnverifiedInitial,
+                        state.package_assessor.advisory_db(),
+                    ) {
+                        state.baseline_store.set_baseline(path, initial);
+                    }
+                }
+                let res = PackageMonitorWorkspaceResult {
+                    monitored: true,
+                    workspace_path: path.display().to_string(),
+                    active_files,
+                    message: "Workspace registered for bounded dependency monitoring".to_string(),
+                };
+                JsonRpcResponse::success(id, serde_json::to_value(res).unwrap())
+            } else {
+                state.workspace_monitor.unregister_workspace(path);
+                let res = PackageMonitorWorkspaceResult {
+                    monitored: false,
+                    workspace_path: path.display().to_string(),
+                    active_files: vec![],
+                    message: "Workspace unregistered from monitoring".to_string(),
+                };
+                JsonRpcResponse::success(id, serde_json::to_value(res).unwrap())
+            }
         }
 
         "engine.shutdown" => {

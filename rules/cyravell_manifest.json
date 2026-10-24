@@ -1,10 +1,10 @@
 {
-  "manifest_version": "2.5",
-  "release_version": "0.2.5",
-  "created_at": "2026-10-24T10:00:00Z",
+  "manifest_version": "2.6",
+  "release_version": "0.2.6",
+  "created_at": "2026-10-24T10:45:00Z",
   "files": {
     "rules/baseline_rules.json": "88b70ba3c8cfe4adfec43ce1c7c4e478cf5d16d5faadb9dfbacca5a757ccc348",
-    "rules/package_advisories.json": "0b3e11fb005418d29ac35081fe44350e0bab02655d0237d897afe5f7b6e79b0a",
+    "rules/package_advisories.json": "72b8d81b99c957a022985f89e78c0ebcf9314396ab28db117b21cc67663a51aa",
     "rules/schema.json": "f172f71ba24c40953c8419c7d41c9f1291bd6c9a689616998c1f2cc819b0f594"
   }
 }

@@ -23,9 +23,12 @@ use crate::audit::AuditLog;
 use crate::model::{
     AnalysisCompleteness, AssessmentStatus, Confidence, ExecutionOutcome, GateDecision,
     GateDispatchAuthorizedParams, GateDispatchAuthorizedResult, GateEvaluateResult,
-    GateRecordOutcomeParams, PackageAssessmentResult, RiskAssessment, Severity,
+    GateRecordOutcomeParams, PackageAssessmentResult, PostOperationVerificationStatus,
+    RiskAssessment, Severity,
 };
-use crate::package::{summarize_assessment, PackageSecurityAssessor};
+use crate::package::{
+    summarize_assessment, BaselineStore, PackageSecurityAssessor, PostOperationVerifier,
+};
 use crate::policy::PolicyEngine;
 
 #[derive(Debug, Clone)]
@@ -49,6 +52,7 @@ pub struct ExecutionGate {
     in_process_audit: Option<Arc<AuditLog>>,
     approval_manager: Arc<ApprovalManager>,
     package_assessor: Arc<PackageSecurityAssessor>,
+    baseline_store: Arc<BaselineStore>,
     fail_closed: bool,
 }
 
@@ -96,6 +100,7 @@ impl ExecutionGate {
             in_process_audit,
             approval_manager,
             package_assessor: Arc::new(PackageSecurityAssessor::default()),
+            baseline_store: Arc::new(BaselineStore::default()),
             fail_closed,
         }
     }
@@ -103,6 +108,15 @@ impl ExecutionGate {
     pub fn with_package_assessor(mut self, package_assessor: Arc<PackageSecurityAssessor>) -> Self {
         self.package_assessor = package_assessor;
         self
+    }
+
+    pub fn with_baseline_store(mut self, baseline_store: Arc<BaselineStore>) -> Self {
+        self.baseline_store = baseline_store;
+        self
+    }
+
+    pub fn baseline_store(&self) -> &Arc<BaselineStore> {
+        &self.baseline_store
     }
 
     pub fn package_assessor(&self) -> &Arc<PackageSecurityAssessor> {
@@ -258,10 +272,51 @@ impl ExecutionGate {
             }
         }
 
-        // Step 2.5: Pre-Installation Package Security Assessment
+        // Step 2.5: Active Drift Enforcement (Hard block if workspace has confirmed malicious packages)
+        let working_path = working_dir.unwrap_or_else(|| Path::new("."));
+        if let Some(drift) = self.baseline_store.get_drift_report(working_path) {
+            if let Some(mal_finding) = drift.findings.iter().find(|f| f.is_malicious) {
+                let risk = RiskAssessment {
+                    severity: Severity::Critical,
+                    confidence: Confidence::High,
+                    rule_id: "RULE-DRIFT-MALICIOUS".to_string(),
+                    reason: format!(
+                        "Blocked: Workspace dependency drift contains confirmed malicious package '{}'",
+                        mal_finding.package_name
+                    ),
+                    evidence: mal_finding.evidence.clone(),
+                    recommended_action: "BLOCK_AND_ALERT".to_string(),
+                    evaluated_at: chrono::Utc::now(),
+                    matched_rules: mal_finding.applicable_rules.clone(),
+                    potential_impact: Some(
+                        "Supply chain malware presence detected in project dependency state".to_string(),
+                    ),
+                    analysis_completeness: AnalysisCompleteness::Complete,
+                    analysis_details: None,
+                };
+
+                return GateEvaluateResult {
+                    decision: GateDecision::Block,
+                    outcome: ExecutionOutcome::BlockedByPolicy,
+                    risk_assessment: risk,
+                    analysis_completeness: AnalysisCompleteness::Complete,
+                    request_id: None,
+                    session_id: sid,
+                    audit_sequence: None,
+                    audit_record_hash: None,
+                    reason: format!(
+                        "Blocked: Workspace contains confirmed malicious package '{}' (dependency drift)",
+                        mal_finding.package_name
+                    ),
+                    allow_dispatch: false,
+                    package_assessment: None,
+                };
+            }
+        }
+
+        // Step 2.6: Pre-Installation Package Security Assessment
         let mut attached_package_assessment = None;
         if self.package_assessor.config().enabled {
-            let working_path = working_dir.unwrap_or_else(|| Path::new("."));
             if let Some(pkg_res) = self
                 .package_assessor
                 .assess_command_string(command, working_path)
@@ -685,6 +740,42 @@ impl ExecutionGate {
                             package_assessment: eval.package_assessment.as_ref(),
                         });
 
+                        // Post-operation verification for package operations
+                        if let Some(dir) = working_dir {
+                            if crate::package::detect_package_command_from_raw(command).is_some() {
+                                let pre_baseline = self.baseline_store.get_baseline(dir);
+                                let post_res = PostOperationVerifier::verify(
+                                    dir,
+                                    command,
+                                    Some(exit_code),
+                                    pre_baseline.as_ref(),
+                                    self.package_assessor.advisory_db(),
+                                );
+                                if let Some(ref drift) = post_res.drift_report {
+                                    self.baseline_store.set_drift_report(dir, drift.clone());
+                                }
+                                let _ = self.record_audit_raw(
+                                    &format!("post-verify-{}", uuid::Uuid::new_v4()),
+                                    "POST_OPERATION_VERIFICATION",
+                                    &format!(
+                                        "Command: {}, ProcessOutcome: {:?}, VerificationStatus: {:?}, PreFingerprint: {:?}, PostFingerprint: {:?}",
+                                        command,
+                                        post_res.process_outcome,
+                                        post_res.verification_status,
+                                        post_res.pre_operation_fingerprint,
+                                        post_res.post_operation_fingerprint
+                                    ),
+                                    match post_res.verification_status {
+                                        PostOperationVerificationStatus::Verified => Severity::Low,
+                                        PostOperationVerificationStatus::UnexpectedChanges => Severity::High,
+                                        PostOperationVerificationStatus::AssessmentFailed => Severity::High,
+                                        PostOperationVerificationStatus::ExecutionFailed => Severity::Medium,
+                                        PostOperationVerificationStatus::Inconclusive => Severity::Low,
+                                    },
+                                );
+                            }
+                        }
+
                         GateResult {
                             decision: eval.decision,
                             outcome: ExecutionOutcome::Dispatched,
@@ -950,6 +1041,42 @@ impl ExecutionGate {
             Some((s, h)) => (s, h),
             None => (0, "UNRECORDED".to_string()),
         };
+
+        // Step 6: Post-operation verification for package operations
+        if let Some(dir) = working_path {
+            if crate::package::detect_package_command_from_raw(&params.command).is_some() {
+                let pre_baseline = self.baseline_store.get_baseline(dir);
+                let post_res = PostOperationVerifier::verify(
+                    dir,
+                    &params.command,
+                    exit_code,
+                    pre_baseline.as_ref(),
+                    self.package_assessor.advisory_db(),
+                );
+                if let Some(ref drift) = post_res.drift_report {
+                    self.baseline_store.set_drift_report(dir, drift.clone());
+                }
+                let _ = self.record_audit_raw(
+                    &format!("post-verify-{}", uuid::Uuid::new_v4()),
+                    "POST_OPERATION_VERIFICATION",
+                    &format!(
+                        "Command: {}, ProcessOutcome: {:?}, VerificationStatus: {:?}, PreFingerprint: {:?}, PostFingerprint: {:?}",
+                        sanitized,
+                        post_res.process_outcome,
+                        post_res.verification_status,
+                        post_res.pre_operation_fingerprint,
+                        post_res.post_operation_fingerprint
+                    ),
+                    match post_res.verification_status {
+                        PostOperationVerificationStatus::Verified => Severity::Low,
+                        PostOperationVerificationStatus::UnexpectedChanges => Severity::High,
+                        PostOperationVerificationStatus::AssessmentFailed => Severity::High,
+                        PostOperationVerificationStatus::ExecutionFailed => Severity::Medium,
+                        PostOperationVerificationStatus::Inconclusive => Severity::Low,
+                    },
+                );
+            }
+        }
 
         Ok(GateDispatchAuthorizedResult {
             request_id: params.request_id,

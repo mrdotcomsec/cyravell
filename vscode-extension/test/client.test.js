@@ -73,6 +73,51 @@ async function runTests() {
     console.log('  ✓ dispatchAuthorized fails safely when disconnected');
   }
 
+  // Test 10: createBaseline throws if engine is disconnected
+  try {
+    await client.createBaseline('/tmp/test-workspace');
+    assert.fail('Expected error when creating baseline while disconnected');
+  } catch (e) {
+    assert.ok(e.message.includes('not connected'), 'Must throw not connected error');
+    console.log('  ✓ createBaseline fails safely when disconnected');
+  }
+
+  // Test 11: getBaseline throws if engine is disconnected
+  try {
+    await client.getBaseline('/tmp/test-workspace');
+    assert.fail('Expected error when getting baseline while disconnected');
+  } catch (e) {
+    assert.ok(e.message.includes('not connected'), 'Must throw not connected error');
+    console.log('  ✓ getBaseline fails safely when disconnected');
+  }
+
+  // Test 12: detectDrift throws if engine is disconnected
+  try {
+    await client.detectDrift('/tmp/test-workspace');
+    assert.fail('Expected error when detecting drift while disconnected');
+  } catch (e) {
+    assert.ok(e.message.includes('not connected'), 'Must throw not connected error');
+    console.log('  ✓ detectDrift fails safely when disconnected');
+  }
+
+  // Test 13: verifyPostOperation throws if engine is disconnected
+  try {
+    await client.verifyPostOperation('/tmp/test-workspace', 'npm install', 0);
+    assert.fail('Expected error when verifying post-operation while disconnected');
+  } catch (e) {
+    assert.ok(e.message.includes('not connected'), 'Must throw not connected error');
+    console.log('  ✓ verifyPostOperation fails safely when disconnected');
+  }
+
+  // Test 14: monitorWorkspace throws if engine is disconnected
+  try {
+    await client.monitorWorkspace('/tmp/test-workspace', true);
+    assert.fail('Expected error when monitoring workspace while disconnected');
+  } catch (e) {
+    assert.ok(e.message.includes('not connected'), 'Must throw not connected error');
+    console.log('  ✓ monitorWorkspace fails safely when disconnected');
+  }
+
   console.log('✓ All extension client tests passed successfully!');
 }
 

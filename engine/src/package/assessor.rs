@@ -57,6 +57,10 @@ impl PackageSecurityAssessor {
         self
     }
 
+    pub fn advisory_db(&self) -> &AdvisoryDatabase {
+        &self.advisory_db
+    }
+
     pub fn advisory_db_mut(&mut self) -> &mut AdvisoryDatabase {
         &mut self.advisory_db
     }

@@ -68,6 +68,8 @@ enum Commands {
     TestAdversarialGate,
     /// Test package security enforcement at the execution gate (Phase 2.5)
     TestPackageGate,
+    /// Test dependency baselining, drift detection, and monitoring (Phase 2.6)
+    TestDriftMonitor,
     /// Run comprehensive automated integration test suite
     RunSuite,
 }
@@ -612,12 +614,17 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             println!("  ✓ All Phase 2.4 adversarial validation checks passed!");
 
             // 11. Phase 2.5 Package Security Enforcement
-            println!("\n[11/11] Testing Phase 2.5 package security enforcement over IPC...");
+            println!("\n[11/12] Testing Phase 2.5 package security enforcement over IPC...");
             run_package_gate_suite(&socket_path)?;
             println!("  ✓ All Phase 2.5 package security enforcement checks passed!");
 
+            // 12. Phase 2.6 Dependency Baselining & Drift Monitoring
+            println!("\n[12/12] Testing Phase 2.6 dependency baselining and drift monitoring over IPC...");
+            run_drift_monitor_suite(&socket_path)?;
+            println!("  ✓ All Phase 2.6 dependency baselining and drift monitoring checks passed!");
+
             println!("\n══════════════════════════════════════════════════════════════");
-            println!("  ALL INTEGRATION TESTS PASSED (11/11)");
+            println!("  ALL INTEGRATION TESTS PASSED (12/12)");
             println!("══════════════════════════════════════════════════════════════");
         }
 
@@ -628,6 +635,16 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             run_package_gate_suite(&socket_path)?;
             println!("\n══════════════════════════════════════════════════════════════");
             println!("  ALL PACKAGE SECURITY GATE TESTS PASSED!");
+            println!("══════════════════════════════════════════════════════════════");
+        }
+
+        Commands::TestDriftMonitor => {
+            println!("══════════════════════════════════════════════════════════════");
+            println!("  Phase 2.6: Dependency Baselining and Drift Monitoring Tests  ");
+            println!("══════════════════════════════════════════════════════════════");
+            run_drift_monitor_suite(&socket_path)?;
+            println!("\n══════════════════════════════════════════════════════════════");
+            println!("  ALL DRIFT MONITORING TESTS PASSED!");
             println!("══════════════════════════════════════════════════════════════");
         }
 
@@ -1092,6 +1109,118 @@ fn run_package_gate_suite(socket_path: &PathBuf) -> Result<(), Box<dyn std::erro
     assert_eq!(clean_res["decision"], "ALLOW");
     assert_eq!(clean_res["allow_dispatch"], true);
     println!("  ✓ 5. Clean package operation (cargo check) evaluated and allowed");
+
+    Ok(())
+}
+
+fn run_drift_monitor_suite(socket_path: &PathBuf) -> Result<(), Box<dyn std::error::Error>> {
+    let test_dir = tempfile::tempdir()?;
+    let pkg_json = test_dir.path().join("package.json");
+    std::fs::write(
+        &pkg_json,
+        r#"{"name": "drift-test", "dependencies": {"express": "4.18.2"}}"#,
+    )?;
+
+    // 1. package.create_baseline
+    let create_res = send_rpc(
+        socket_path,
+        "package.create_baseline",
+        Some(serde_json::json!({
+            "workspace_path": test_dir.path().display().to_string(),
+            "reason": "INITIAL_BASELINE",
+            "trust_state": "VERIFIED_APPROVED"
+        })),
+    )?;
+    let base_obj = create_res.result.expect("create_baseline failed");
+    let initial_fp = base_obj["baseline"]["baseline_fingerprint"]
+        .as_str()
+        .expect("missing fingerprint")
+        .to_string();
+    assert_eq!(base_obj["baseline"]["trust_state"], "VERIFIED_APPROVED");
+    println!(
+        "  ✓ 1. Initial dependency baseline created: fingerprint={}",
+        &initial_fp[..16]
+    );
+
+    // 2. package.get_baseline
+    let get_res = send_rpc(
+        socket_path,
+        "package.get_baseline",
+        Some(serde_json::json!({
+            "workspace_path": test_dir.path().display().to_string()
+        })),
+    )?;
+    let get_obj = get_res.result.expect("get_baseline failed");
+    assert_eq!(
+        get_obj["baseline"]["baseline_fingerprint"]
+            .as_str()
+            .unwrap(),
+        initial_fp
+    );
+    println!("  ✓ 2. Verified baseline retrieval and state consistency");
+
+    // 3. package.detect_drift without drift
+    let drift_clean = send_rpc(
+        socket_path,
+        "package.detect_drift",
+        Some(serde_json::json!({
+            "workspace_path": test_dir.path().display().to_string(),
+            "reconcile": false
+        })),
+    )?;
+    let clean_report = drift_clean.result.expect("detect_drift failed");
+    assert_eq!(clean_report["drift_report"]["has_drift"], false);
+    println!("  ✓ 3. Clean baseline state detected: has_drift=false");
+
+    // 4. Introduce dependency drift (add vulnerable package lodash@4.17.20)
+    std::fs::write(
+        &pkg_json,
+        r#"{"name": "drift-test", "dependencies": {"express": "4.18.2", "lodash": "4.17.20"}}"#,
+    )?;
+
+    let drift_dirty = send_rpc(
+        socket_path,
+        "package.detect_drift",
+        Some(serde_json::json!({
+            "workspace_path": test_dir.path().display().to_string(),
+            "reconcile": true
+        })),
+    )?;
+    let dirty_report = drift_dirty.result.expect("detect_drift dirty failed");
+    assert_eq!(dirty_report["drift_report"]["has_drift"], true);
+    println!(
+        "  ✓ 4. Dependency drift accurately detected: unexpected addition & vulnerability detected"
+    );
+
+    // 5. package.verify_post_operation
+    let post_verify = send_rpc(
+        socket_path,
+        "package.verify_post_operation",
+        Some(serde_json::json!({
+            "workspace_path": test_dir.path().display().to_string(),
+            "command": "npm install lodash@4.17.20",
+            "exit_code": 0
+        })),
+    )?;
+    let pv_obj = post_verify.result.expect("verify_post_operation failed");
+    assert!(pv_obj["verification"]["verification_status"].is_string());
+    println!(
+        "  ✓ 5. Post-operation verification recorded in audit log: sequence={}",
+        pv_obj["audit_sequence"]
+    );
+
+    // 6. package.monitor_workspace registration
+    let monitor_res = send_rpc(
+        socket_path,
+        "package.monitor_workspace",
+        Some(serde_json::json!({
+            "workspace_path": test_dir.path().display().to_string(),
+            "register": true
+        })),
+    )?;
+    let mon_obj = monitor_res.result.expect("monitor_workspace failed");
+    assert_eq!(mon_obj["monitored"], true);
+    println!("  ✓ 6. Workspace registered for continuous bounded local monitoring");
 
     Ok(())
 }

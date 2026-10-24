@@ -3,7 +3,7 @@
 
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
-use std::collections::HashMap;
+use std::collections::{BTreeMap, HashMap};
 
 /// Current schema version supported by Phase 1.
 pub const CURRENT_SCHEMA_VERSION: u32 = 1;
@@ -570,4 +570,195 @@ pub struct PackageAssessmentSummary {
     pub malicious_count: usize,
     pub findings: Vec<PackageSecurityFinding>,
     pub manifest_fingerprint: Option<String>,
+}
+
+// ---------------------------------------------------------------------------
+// Phase 2.6: Dependency Baselining and Drift Monitoring Models
+// ---------------------------------------------------------------------------
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "SCREAMING_SNAKE_CASE")]
+pub enum BaselineTrust {
+    VerifiedApproved,
+    PostOperationObserved,
+    ReviewRequired,
+    UnverifiedInitial,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "SCREAMING_SNAKE_CASE")]
+pub enum SnapshotReason {
+    InitialBaseline,
+    PreOperation,
+    PostOperation,
+    ManualInspection,
+    Reconciliation,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct DependencyBaseline {
+    pub workspace_path: String,
+    pub ecosystem: PackageEcosystem,
+    pub package_manager: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub manifest_fingerprint: Option<String>,
+    pub direct_dependencies: BTreeMap<String, String>,
+    pub resolved_dependencies: BTreeMap<String, String>,
+    pub transitive_dependencies: BTreeMap<String, String>,
+    pub integrity_metadata: BTreeMap<String, String>,
+    pub created_at: DateTime<Utc>,
+    pub trust_state: BaselineTrust,
+    pub advisory_database_version: String,
+    pub reason: SnapshotReason,
+    pub baseline_fingerprint: String,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "SCREAMING_SNAKE_CASE")]
+pub enum DriftChangeType {
+    UnexpectedAddition,
+    VersionDrift,
+    UnexpectedRemoval,
+    TransitiveDrift,
+    LockfileOnlyDrift,
+    ManifestOnlyDrift,
+    IntegrityDrift,
+    MaliciousPackageDetected,
+    VulnerabilityDetected,
+    MetadataCorrupted,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "SCREAMING_SNAKE_CASE")]
+pub enum FindingConfidence {
+    Confirmed,
+    Suspicious,
+    Inconclusive,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct DriftFinding {
+    pub finding_id: String,
+    pub ecosystem: PackageEcosystem,
+    pub package_name: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub previous_version: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub current_version: Option<String>,
+    pub change_type: DriftChangeType,
+    pub evidence: Vec<String>,
+    pub applicable_rules: Vec<String>,
+    pub status: FindingConfidence,
+    pub recommended_action: String,
+    pub is_malicious: bool,
+    pub severity: Severity,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct DriftReport {
+    pub workspace_path: String,
+    pub ecosystem: PackageEcosystem,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub trusted_baseline_fingerprint: Option<String>,
+    pub current_fingerprint: String,
+    pub has_drift: bool,
+    pub findings: Vec<DriftFinding>,
+    pub evaluated_at: DateTime<Utc>,
+    pub summary: String,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "SCREAMING_SNAKE_CASE")]
+pub enum PostOperationVerificationStatus {
+    ExecutionFailed,
+    Verified,
+    UnexpectedChanges,
+    AssessmentFailed,
+    Inconclusive,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct PostOperationVerificationResult {
+    pub process_outcome: ExecutionOutcome,
+    pub exit_code: Option<i32>,
+    pub verification_status: PostOperationVerificationStatus,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub pre_operation_fingerprint: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub post_operation_fingerprint: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub drift_report: Option<DriftReport>,
+    pub notes: Vec<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct PackageCreateBaselineParams {
+    pub workspace_path: String,
+    #[serde(default)]
+    pub ecosystem: Option<PackageEcosystem>,
+    #[serde(default)]
+    pub reason: Option<SnapshotReason>,
+    #[serde(default)]
+    pub trust_state: Option<BaselineTrust>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct PackageCreateBaselineResult {
+    pub baseline: DependencyBaseline,
+    pub message: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct PackageGetBaselineParams {
+    pub workspace_path: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct PackageGetBaselineResult {
+    pub baseline: Option<DependencyBaseline>,
+    pub active_drift: Option<DriftReport>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct PackageDetectDriftParams {
+    pub workspace_path: String,
+    #[serde(default)]
+    pub reconcile: bool,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct PackageDetectDriftResult {
+    pub drift_report: DriftReport,
+    pub baseline_trust: Option<BaselineTrust>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct PackageVerifyPostOperationParams {
+    pub workspace_path: String,
+    pub command: String,
+    pub exit_code: i32,
+    #[serde(default)]
+    pub session_id: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct PackageVerifyPostOperationResult {
+    pub verification: PostOperationVerificationResult,
+    pub audit_sequence: u64,
+    pub audit_record_hash: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct PackageMonitorWorkspaceParams {
+    pub workspace_path: String,
+    #[serde(default)]
+    pub register: bool,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct PackageMonitorWorkspaceResult {
+    pub monitored: bool,
+    pub workspace_path: String,
+    pub active_files: Vec<String>,
+    pub message: String,
 }

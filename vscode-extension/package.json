@@ -75,6 +75,16 @@
         "command": "cyravell.reviewApprovals",
         "title": "Cyravell: Review Pending Command Approvals",
         "icon": "$(checklist)"
+      },
+      {
+        "command": "cyravell.createBaseline",
+        "title": "Cyravell: Create Dependency Baseline",
+        "icon": "$(package)"
+      },
+      {
+        "command": "cyravell.reconcileDrift",
+        "title": "Cyravell: Check Dependency Drift",
+        "icon": "$(history)"
       }
     ],
     "menus": {

@@ -128,6 +128,76 @@ export interface GateDispatchAuthorizedResult {
   message: string;
 }
 
+export type BaselineTrust =
+  | 'VERIFIED_APPROVED'
+  | 'POST_OPERATION_OBSERVED'
+  | 'REVIEW_REQUIRED'
+  | 'UNVERIFIED_INITIAL';
+
+export type SnapshotReason =
+  | 'INITIAL_BASELINE'
+  | 'PRE_OPERATION'
+  | 'POST_OPERATION'
+  | 'MANUAL_INSPECTION'
+  | 'RECONCILIATION';
+
+export interface DependencyBaseline {
+  workspace_path: string;
+  ecosystem: string;
+  package_manager: string;
+  manifest_fingerprint?: string;
+  direct_dependencies: Record<string, string>;
+  resolved_dependencies: Record<string, string>;
+  transitive_dependencies: Record<string, string>;
+  integrity_metadata: Record<string, string>;
+  created_at: string;
+  trust_state: BaselineTrust;
+  advisory_database_version: string;
+  reason: SnapshotReason;
+  baseline_fingerprint: string;
+}
+
+export interface DriftFinding {
+  finding_id: string;
+  ecosystem: string;
+  package_name: string;
+  previous_version?: string;
+  current_version?: string;
+  change_type: string;
+  evidence: string[];
+  applicable_rules: string[];
+  status: 'CONFIRMED' | 'SUSPICIOUS' | 'INCONCLUSIVE';
+  recommended_action: string;
+  is_malicious: boolean;
+  severity: string;
+}
+
+export interface DriftReport {
+  workspace_path: string;
+  ecosystem: string;
+  trusted_baseline_fingerprint?: string;
+  current_fingerprint: string;
+  has_drift: boolean;
+  findings: DriftFinding[];
+  evaluated_at: string;
+  summary: string;
+}
+
+export interface PostOperationVerificationResult {
+  process_outcome: string;
+  exit_code?: number;
+  verification_status:
+    | 'EXECUTION_FAILED'
+    | 'VERIFIED'
+    | 'UNEXPECTED_CHANGES'
+    | 'ASSESSMENT_FAILED'
+    | 'INCONCLUSIVE';
+  pre_operation_fingerprint?: string;
+  post_operation_fingerprint?: string;
+  drift_report?: DriftReport;
+  notes: string[];
+}
+
 export interface SecurityEventItem {
   event: {
     id: string;
@@ -415,6 +485,73 @@ export class EngineClient extends EventEmitter {
       command,
       authorization_token: authorizationToken,
       working_directory: workingDirectory,
+    });
+  }
+
+  public async createBaseline(
+    workspacePath: string,
+    ecosystem?: string,
+    trustState?: BaselineTrust
+  ): Promise<{ baseline: DependencyBaseline; message: string }> {
+    if (this.state !== 'CONNECTED') {
+      throw new Error('Engine is not connected');
+    }
+    return this.call('package.create_baseline', {
+      workspace_path: workspacePath,
+      ecosystem,
+      trust_state: trustState,
+    });
+  }
+
+  public async getBaseline(
+    workspacePath: string
+  ): Promise<{ baseline?: DependencyBaseline; active_drift?: DriftReport }> {
+    if (this.state !== 'CONNECTED') {
+      throw new Error('Engine is not connected');
+    }
+    return this.call('package.get_baseline', {
+      workspace_path: workspacePath,
+    });
+  }
+
+  public async detectDrift(
+    workspacePath: string,
+    reconcile = false
+  ): Promise<{ drift_report: DriftReport; baseline_trust?: BaselineTrust }> {
+    if (this.state !== 'CONNECTED') {
+      throw new Error('Engine is not connected');
+    }
+    return this.call('package.detect_drift', {
+      workspace_path: workspacePath,
+      reconcile,
+    });
+  }
+
+  public async verifyPostOperation(
+    workspacePath: string,
+    command: string,
+    exitCode: number
+  ): Promise<{ verification: PostOperationVerificationResult; audit_sequence: number }> {
+    if (this.state !== 'CONNECTED') {
+      throw new Error('Engine is not connected');
+    }
+    return this.call('package.verify_post_operation', {
+      workspace_path: workspacePath,
+      command,
+      exit_code: exitCode,
+    });
+  }
+
+  public async monitorWorkspace(
+    workspacePath: string,
+    register: boolean
+  ): Promise<{ monitored: boolean; active_files: string[]; message: string }> {
+    if (this.state !== 'CONNECTED') {
+      throw new Error('Engine is not connected');
+    }
+    return this.call('package.monitor_workspace', {
+      workspace_path: workspacePath,
+      register,
     });
   }
 

@@ -70,6 +70,7 @@ Standard Error Codes:
 - `-32002`: Audit verification failure
 - `-32004`: Hard block violation (confirmed malicious package cannot be approved or dispatched)
 - `-32005`: Manifest modified after approval (TOCTOU integrity check failed)
+- `-32006`: Active drift block or unverified baseline transition denied
 
 ---
 
@@ -591,6 +592,220 @@ In Phase 2.5:
     "audit_sequence": 17,
     "audit_record_hash": "f1e2d3c4b5a6...",
     "message": "Command dispatched after verified authorization"
+  }
+}
+```
+
+---
+
+### 3.13 `package.create_baseline` (Phase 2.6)
+Inspects the specified workspace directory, parses authoritative manifest and lockfile structures, computes deterministic canonical dependency sets and fingerprints, and establishes a dependency baseline in the engine baseline store.
+
+**Request:**
+```json
+{
+  "jsonrpc": "2.0",
+  "id": "13",
+  "method": "package.create_baseline",
+  "params": {
+    "workspace_path": "/workspace/project",
+    "ecosystem": "NPM",
+    "trust_state": "VERIFIED_APPROVED"
+  }
+}
+```
+
+**Response:**
+```json
+{
+  "jsonrpc": "2.0",
+  "id": "13",
+  "result": {
+    "baseline": {
+      "workspace_path": "/workspace/project",
+      "ecosystem": "NPM",
+      "package_manager": "npm",
+      "manifest_fingerprint": "a3f5b7c8...",
+      "direct_dependencies": { "express": "^4.18.2" },
+      "resolved_dependencies": { "express": "4.18.2" },
+      "transitive_dependencies": { "accepts": "1.3.8" },
+      "integrity_metadata": { "express@4.18.2": "sha512-..." },
+      "created_at": "2026-10-24T10:00:00Z",
+      "trust_state": "VERIFIED_APPROVED",
+      "advisory_database_version": "2.6",
+      "reason": "INITIAL_BASELINE",
+      "baseline_fingerprint": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+    },
+    "message": "Baseline created with trust state VerifiedApproved"
+  }
+}
+```
+
+---
+
+### 3.14 `package.get_baseline` (Phase 2.6)
+Retrieves the active baseline and any cached active drift report for a workspace path.
+
+**Request:**
+```json
+{
+  "jsonrpc": "2.0",
+  "id": "14",
+  "method": "package.get_baseline",
+  "params": {
+    "workspace_path": "/workspace/project"
+  }
+}
+```
+
+**Response:**
+```json
+{
+  "jsonrpc": "2.0",
+  "id": "14",
+  "result": {
+    "baseline": {
+      "workspace_path": "/workspace/project",
+      "ecosystem": "NPM",
+      "package_manager": "npm",
+      "direct_dependencies": { "express": "^4.18.2" },
+      "trust_state": "VERIFIED_APPROVED",
+      "baseline_fingerprint": "e3b0c442..."
+    },
+    "active_drift": null
+  }
+}
+```
+
+---
+
+### 3.15 `package.detect_drift` (Phase 2.6)
+Performs deterministic drift detection by comparing the current workspace filesystem state against the stored trusted baseline. Optionally performs filesystem reconciliation. If malicious drift is detected, active drift is registered and blocks subsequent execution gates.
+
+**Request:**
+```json
+{
+  "jsonrpc": "2.0",
+  "id": "15",
+  "method": "package.detect_drift",
+  "params": {
+    "workspace_path": "/workspace/project",
+    "reconcile": true
+  }
+}
+```
+
+**Response:**
+```json
+{
+  "jsonrpc": "2.0",
+  "id": "15",
+  "result": {
+    "drift_report": {
+      "workspace_path": "/workspace/project",
+      "ecosystem": "NPM",
+      "trusted_baseline_fingerprint": "e3b0c442...",
+      "current_fingerprint": "7a8b9c...",
+      "has_drift": true,
+      "findings": [
+        {
+          "finding_id": "drift-find-001",
+          "ecosystem": "NPM",
+          "package_name": "flatmap-stream",
+          "current_version": "0.1.1",
+          "change_type": "MALICIOUS_PACKAGE_DETECTED",
+          "evidence": ["Known malicious package detected in current dependencies: flatmap-stream@0.1.1"],
+          "applicable_rules": ["RULE-PKG-MALICIOUS-001"],
+          "status": "CONFIRMED",
+          "recommended_action": "Immediately remove flatmap-stream",
+          "is_malicious": true,
+          "severity": "CRITICAL"
+        }
+      ],
+      "evaluated_at": "2026-10-24T10:05:00Z",
+      "summary": "1 dependency drift findings detected across NPM dependencies"
+    },
+    "baseline_trust": "REVIEW_REQUIRED"
+  }
+}
+```
+
+---
+
+### 3.16 `package.verify_post_operation` (Phase 2.6)
+Verifies project state immediately after execution of a package operation. Disentangles command exit code from verification safety. Compares against pre-operation baseline and scans new dependencies against the local advisory database.
+
+**Request:**
+```json
+{
+  "jsonrpc": "2.0",
+  "id": "16",
+  "method": "package.verify_post_operation",
+  "params": {
+    "workspace_path": "/workspace/project",
+    "command": "npm install lodash@4.17.21",
+    "exit_code": 0
+  }
+}
+```
+
+**Response:**
+```json
+{
+  "jsonrpc": "2.0",
+  "id": "16",
+  "result": {
+    "verification": {
+      "process_outcome": "Process exited with code 0",
+      "exit_code": 0,
+      "verification_status": "VERIFIED",
+      "pre_operation_fingerprint": "e3b0c442...",
+      "post_operation_fingerprint": "9f8e7d6c...",
+      "drift_report": {
+        "workspace_path": "/workspace/project",
+        "ecosystem": "NPM",
+        "has_drift": false,
+        "findings": [],
+        "evaluated_at": "2026-10-24T10:10:00Z",
+        "summary": "No dependency drift detected"
+      },
+      "notes": ["Post-operation verification completed with status VERIFIED"]
+    },
+    "audit_sequence": 24
+  }
+}
+```
+
+---
+
+### 3.17 `package.monitor_workspace` (Phase 2.6)
+Registers or unregisters a workspace directory for continuous, resource-bounded manifest and lockfile monitoring.
+
+**Request:**
+```json
+{
+  "jsonrpc": "2.0",
+  "id": "17",
+  "method": "package.monitor_workspace",
+  "params": {
+    "workspace_path": "/workspace/project",
+    "register": true
+  }
+}
+```
+
+**Response:**
+```json
+{
+  "jsonrpc": "2.0",
+  "id": "17",
+  "result": {
+    "monitored": true,
+    "active_files": [
+      "/workspace/project/package.json",
+      "/workspace/project/package-lock.json"
+    ],
+    "message": "Workspace registered for continuous bounded dependency monitoring"
   }
 }
 ```

@@ -93,6 +93,9 @@ echo "  Engine daemon started (PID ${ENGINE_PID}) on socket ${TEST_SOCK}"
 # Test Phase 2.5 package security enforcement over IPC
 "${ROOT_DIR}/target/debug/cyravell-test-harness" --socket-path "${TEST_SOCK}" test-package-gate
 
+# Test Phase 2.6 dependency baselining and drift monitoring over IPC
+"${ROOT_DIR}/target/debug/cyravell-test-harness" --socket-path "${TEST_SOCK}" test-drift-monitor
+
 # Test Phase 2.1 complex chains and operator awareness
 "${ROOT_DIR}/target/debug/cyravell-test-harness" --socket-path "${TEST_SOCK}" test-complex-chains
 

@@ -50,6 +50,17 @@ pub fn detect_package_command(cmd: &AtomicCommand, raw: &str) -> Option<Detected
     }
 }
 
+/// Convenience function that parses a raw command string and detects package manager operations across all atomic commands.
+pub fn detect_package_command_from_raw(raw: &str) -> Option<DetectedPackageCommand> {
+    let chain = crate::analysis::ast::parse_command(raw);
+    for cmd in chain.all_atomic_commands() {
+        if let Some(det) = detect_package_command(cmd, raw) {
+            return Some(det);
+        }
+    }
+    None
+}
+
 fn unwrap_wrappers<'a>(prog: &'a str, args: &'a [String]) -> (String, Vec<String>) {
     let base = extract_base_program(prog);
     if (base == "sudo" || base == "env" || base == "doas") && !args.is_empty() {

@@ -1,6 +1,6 @@
- # Cyravell — Threat Model
+# Cyravell — Threat Model
 
-**Version:** 2.5.0 (Phase 2.5: Package Security Enforcement)  
+**Version:** 2.6.0 (Phase 2.6: Post-Installation Package Integrity & Drift Monitoring)  
 **Status:** Approved  
 **Classification:** Public / Open Source  
 
@@ -149,6 +149,23 @@ We classify potential threat actors into the following tiers:
   - **Static Pre-Exec Limitation:** Cyravell inspects commands and project files before execution. It does not inspect dynamically downloaded binary blobs or child processes spawned by uninstrumented package manager sub-scripts unless run in the controlled terminal.
   - **Advisory Database Scope:** Cyravell detects known malicious packages and advisories present in its local database. Clean status (`CleanNoMatches`) conveys "no matches found in verified local database", not proof of absolute safety against unknown zero-days.
 
+### 5.7 Post-Installation Integrity, Dependency Drift, & Stealth Modifications (Phase 2.6)
+- **Threat:**
+  - **Out-of-band File Tampering:** An agent or script modifies manifests (`package.json`, `Cargo.toml`) or lockfiles directly on disk without running a package manager CLI command, slipping malicious packages past pre-execution checks.
+  - **Post-Install Stealth Infection:** A package manager successfully finishes with exit code `0` while introducing unexpected transitive dependencies or known vulnerable/malicious packages.
+  - **Lockfile Integrity / Hash Drift:** An attacker modifies lockfile integrity checksums or replaces registry URLs with private malicious registries (`npm_config_registry`, etc.).
+  - **Metadata Corruption Evasion:** An attacker intentionally corrupts lockfile syntax so parsers fail open or fail to detect dependencies.
+- **Mitigation:**
+  - **Deterministic Dependency Baselining:** Engine computes a canonical SHA-256 fingerprint over direct, resolved, and transitive dependency sets (excluding non-deterministic fields like timestamps).
+  - **Invariant Trust Boundaries:** An unverified baseline snapshot (`UNVERIFIED_INITIAL` or `REVIEW_REQUIRED`) cannot overwrite an existing `VERIFIED_APPROVED` baseline without explicit developer approval.
+  - **Post-Operation Verification:** Immediately upon completion of a controlled package command, Cyravell independently inspects the filesystem to verify that only expected changes occurred, re-evaluates all dependencies against the advisory database, and records the outcome in the audit chain.
+  - **Active Drift Hard-Block:** If active malicious drift (`MaliciousPackageDetected`) is present in the workspace, the execution gate immediately hard-blocks all subsequent command dispatches in that workspace (exit code 126).
+  - **Bounded Continuous Monitoring:** Background monitor debounces and reconciles atomic file replacements on authoritative project configuration files, logging changes honestly as `"Observed via local filesystem reconciliation (unattributed background change)"`.
+  - **Credential Redaction:** Strips auth tokens and registry credentials from command lines, URLs, and audit logs.
+- **Threat Model Boundaries & Non-Claims:**
+  - **Filesystem Event Attribution:** Filesystem monitoring proves *that* a file changed, not *which* process initiated the write. Cyravell refuses to fabricate process attribution for background file events without verified execution context.
+  - **Scope of Continuous Monitoring:** Cyravell monitors authoritative project manifest and lockfile targets, not every file in `node_modules/` or arbitrary workspace directories, avoiding I/O exhaustion.
+
 ---
 
 ## 6. Security Assumptions
@@ -167,11 +184,12 @@ We classify potential threat actors into the following tiers:
 
 ---
 
-## 8. Known Limitations (Phase 2.5)
+## 8. Known Limitations (Phase 2.6)
 
 - **Static Classification vs. Real-Time Blocking:** The execution gate blocks commands initiated through Cyravell's controlled terminal (`cyravell-engine shell`, `exec`, or VS Code Protected Terminal). Commands entered into unmonitored external shells run directly without gate interception.
 - **Audit Tamper Evident, Not Tamper Proof:** A local user with write access to the filesystem can theoretically rewrite the log and recompute a fraudulent hash chain if they possess all trust material. True non-repudiation requires remote append-only anchoring (Phase 3).
 - **Package Advisory Scope:** Cyravell checks against the local advisory database. It does not perform live network queries to npm/PyPI/crates.io (to protect developer privacy and air-gap integrity). A clean check indicates no matches in the local database, not an absence of risk.
+- **Attribution Transparency:** Out-of-band file modifications observed by workspace monitoring indicate filesystem state changes; without active PTY session context, they cannot be attributed to a specific process or PID. Cyravell honestly reports these as background file reconciliation events.
 - **Parser Approximations:** Pure static analysis cannot fully resolve dynamic multi-stage variable expansions or remote runtime code strings without execution. Complex or unclosed constructs are honestly flagged as `PARTIAL` or `INCONCLUSIVE`.
 
 ---
