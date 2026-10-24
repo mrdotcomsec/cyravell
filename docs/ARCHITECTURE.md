@@ -551,6 +551,87 @@ Cyravell Phase 2.8 hardens the signed advisory update system against adversarial
 - **Durability & Crash Consistency:** The file is flushed and synced (`file.sync_all()`), atomically renamed, and the parent directory is synced (`dir_file.sync_all()`).
 - **Fail-Safe Recovery:** If any error occurs during write, sync, or rename, temporary files are cleaned up and the previous active database and memory state remain 100% untouched.
 
+---
+
+## 13. Phase 2.9: IPC Authorization, Local Access Control, and Privilege Boundary Hardening
+
+Phase 2.9 establishes strict local privilege separation and peer authorization across Cyravell's Unix domain socket IPC interface. Rather than treating local connections as implicitly trusted or relying on client-side confirmation strings, authorization is anchored directly in the operating system kernel.
+
+```
+┌─────────────────────────────────────────────────────────────────────────────┐
+│                 Phase 2.9 IPC Privilege Boundary Architecture              │
+└─────────────────────────────────────────────────────────────────────────────┘
+  [ Local Client Process ] 
+          │
+     Unix Socket Connect
+          │
+          ▼
+  [ SO_PEERCRED Extraction ] ──► Kernel-Attested (PID, UID, GID)
+          │                      (Client identity headers in body ignored)
+          ▼
+  [ Peer Policy Evaluation ] ──► SameUserOnly / Explicit UID Allowlist
+          │                      (Unauthorized UID -> Drop & Audit IPC_ACCESS_DENIED)
+          ▼
+  [ JSON Frame Sanitizer ]   ──► Max Frame Limit (1 MiB) + Strict JSON (No Duplicate Keys)
+          │
+          ▼
+  [ Tiered Operation Gate ]  ──► Method Authorization Matrix:
+          │                      • ReadOnly   (Status, Health, Analyze, Baselines)
+          │                      • Standard   (Evaluate, Record, Create Baseline)
+          │                      • Privileged (Approval Decide, Dispatch, Shutdown)
+          │                      • Rollback   (Two-Phase Authenticated Rollback)
+          ▼
+  [ Rollback Auth Manager ]  ──► Two-Phase Tokenized Rollback:
+                                 Phase 1: `package.request_rollback_authorization`
+                                          (Validates bundle signature, reason >= 8 chars,
+                                           confirmation phrase -> issues 60s single-use token)
+                                 Phase 2: `package.import_advisory_bundle`
+                                          (Consumes token atomically; enforces exact peer UID,
+                                           target version, and payload digest matching)
+```
+
+### 13.1 Kernel-Attested Peer Authentication (`SO_PEERCRED`)
+- **Unforgeable Identity:** On Linux, client identity is resolved through the `SO_PEERCRED` socket option (`libc::getsockopt`), returning the kernel-attested `(pid, uid, gid)`.
+- **Spoofing Resistance:** Any client-supplied claims in the request body (such as `user_id`, `claimed_uid`, or `source_user`) are strictly ignored during authentication and authorization checks.
+- **Fail-Closed Verification:** If peer credentials cannot be extracted from the socket, the connection is immediately terminated with JSON-RPC error code `-32003`.
+
+### 13.2 Operation-Level Authorization Tiers
+Methods are mapped into four distinct privilege tiers:
+1. **`ReadOnly`:** Querying health, handshake, integrity, command analysis, pending approvals, event history, audit verification, dependency baselines, drift detection, and inspecting advisory bundles.
+2. **`Standard`:** Gate command evaluation, recording execution outcomes, submitting security events, baseline creation, post-operation verification, and registering workspace monitoring.
+3. **`Privileged`:** Approval decisions (`approval.decide`), gated command dispatch (`gate.dispatch_authorized`), advisory bundle import (`package.import_advisory_bundle`), requesting rollback authorization (`package.request_rollback_authorization`), and engine shutdown (`engine.shutdown`).
+4. **`Rollback`:** Restricted to two-phase tokenized rollback override workflows.
+
+When non-owner peers connect under multi-user configurations (`allow_read_only_for_other_users`), attempts to invoke operations above their permitted tier fail with `-32003` and generate high-severity `IPC_OPERATION_DENIED` audit events.
+
+### 13.3 Two-Phase Tokenized Rollback Authorization
+A static confirmation phrase like `CONFIRM_ADVISORY_ROLLBACK` alone is human acknowledgment, not identity authorization. Phase 2.9 replaces single-step overrides with a secure two-phase workflow:
+1. **Authorization Request (`package.request_rollback_authorization`):**
+   - The authenticated peer must belong to the `Privileged` tier.
+   - The candidate bundle must pass cryptographic signature verification against the engine's `TrustedKeyStore`.
+   - The caller must submit an operator reason of at least 8 characters and the exact phrase `"CONFIRM_ADVISORY_ROLLBACK"`.
+   - The engine issues a single-use, 60-second time-to-live (TTL) token cryptographically bound to `(peer.uid, target_version, payload_digest, reason)`.
+   - An audit record `PACKAGE_ADVISORY_ROLLBACK_REQUESTED` is appended without exposing the token secret.
+2. **Atomic Token Consumption (`package.import_advisory_bundle`):**
+   - When `allow_rollback: true` is presented, a valid `rollback_authorization_token` is strictly mandatory.
+   - The engine atomically verifies and consumes the token under mutex synchronization:
+     - Replay attempts immediately fail with `AlreadyConsumed`.
+     - Presentation by a different local UID fails with `PeerUidMismatch`.
+     - Bundle version tampering fails with `TargetVersionMismatch`.
+     - Swapping bundle payload fails with `PayloadDigestMismatch`.
+     - Expired tokens fail with `Expired`.
+   - The token cannot be used again; subsequent calls require requesting a new token.
+
+### 13.4 Local Filesystem Hardening & Stale Socket Protection
+- **Socket Directory (`0700`):** Parent directory must be owned by the engine's effective UID, must not be a symbolic link, and must not be world-writable.
+- **Socket Permissions (`0600`):** Newly bound sockets are set to mode `0600` and verified against symlinks and non-owner UIDs.
+- **Safe Stale Socket Reclamation:** If an existing socket path exists:
+  - It is verified to be a socket (`S_IFSOCK`), not a symlink, and owned by the current EUID.
+  - An active connection check confirms no live engine is listening (`connect()` fails).
+  - Regular files, symlinks, active sockets, or paths owned by other users are never unlinked.
+- **Security State File Hardening:** `AuditLog`, `TrustedKeyStore`, and advisory databases reject world-writable files (`mode & 0o002 != 0`) and symbolic links during initialization and append operations.
+
+
 
 
 

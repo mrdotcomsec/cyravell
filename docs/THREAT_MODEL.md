@@ -203,8 +203,16 @@ We classify potential threat actors into the following tiers:
   - **Irreversible Malicious Package Tombstones:** Packages confirmed as malicious are recorded in `malicious_tombstones`. This classification survives advisory rollbacks, database deletions, and engine restarts.
   - **O_EXCL Staging & Directory Sync:** Temporary files are created with `create_new(true)` (`O_EXCL`) and mode `0600`, followed by atomic rename and directory synchronization on Unix.
 
+- **Phase 2.9 Hardened IPC Privilege Boundaries:**
+  - **OS-Level Peer Authentication:** On Linux, client credentials (`pid`, `uid`, `gid`) are determined by the kernel via `SO_PEERCRED`. Any claimed identity passed in the JSON-RPC request envelope or body (`user_id`, `claimed_uid`, `source_user`) is disregarded.
+  - **Tiered Access Control:** Local processes are partitioned into `ReadOnly`, `Standard`, `Privileged`, and `Rollback` tiers. Unprivileged peers cannot trigger approval decisions, dispatch commands, import intelligence, or shut down the daemon.
+  - **Two-Phase Tokenized Rollback Authorization:** Overriding monotonic version protections cannot be achieved via static strings. The caller must submit a cryptographically signed bundle, valid reason, and acknowledgment to receive an ephemeral 60s single-use token bound to their UID, target version, and payload digest. Tokens cannot be replayed or transferred across bundles.
+  - **Strict Local Filesystem Protection:** Socket parent directory (`0700`) and socket file (`0600`) reject symlinks and world-writable permissions. Stale sockets owned by other users or active sockets cannot be unlinked or hijacked.
+  - **Strict JSON Frame Parsing:** Frames containing duplicate keys are rejected with `-32700`, preventing parser ambiguity attacks against the IPC layer.
+
 - **Threat Model Boundaries & Non-Claims:**
-  - **Limits of Local File Permissions:** Cyravell protects against unprivileged processes and developer AI coding agent misbehavior. It does *not* claim to protect against an attacker with root, kernel, or physical disk modification access to the host.
+  - **Limits of Local File Permissions:** Cyravell protects against unprivileged processes, sibling users, and developer AI coding agent misbehavior. It does *not* claim to protect against an attacker with root, kernel, or physical disk modification access to the host.
+  - **Same-User Boundary Invariants:** Within the same OS user account, processes share filesystem read/write permissions. Cyravell enforces gate invariants and authorization tokens to prevent unvetted AI agent sub-processes from dispatching commands without approval, but an AI process given unrestricted direct filesystem access could alter user-owned files outside Cyravell.
   - **Local Tamper-Evident Audit Chains:** Cyravell's SHA-256 cryptographic audit chain detects deletion or modification of records under normal operation. A root attacker who rewrites the entire log and state files cannot be stopped without external cryptographic notarization (Phase 3).
 
 ---

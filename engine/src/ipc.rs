@@ -3,7 +3,6 @@
 
 use std::collections::VecDeque;
 use std::io::{BufRead, BufReader, Write};
-use std::os::unix::fs::PermissionsExt;
 use std::os::unix::net::{UnixListener, UnixStream};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
@@ -38,6 +37,8 @@ pub struct EngineState {
     pub manifest_path: Option<PathBuf>,
     pub base_dir: PathBuf,
     pub shutdown_requested: AtomicBool,
+    pub auth_policy: crate::auth::IpcAuthPolicy,
+    pub rollback_manager: Arc<crate::auth::RollbackAuthorizationManager>,
 }
 
 pub struct IpcServer {
@@ -70,6 +71,29 @@ impl IpcServer {
         approval_manager: Arc<ApprovalManager>,
         backend: Arc<dyn ExecutionBackend>,
     ) -> Result<Self, Box<dyn std::error::Error>> {
+        Self::with_components(
+            socket_path,
+            data_dir,
+            manifest_path,
+            base_dir,
+            approval_manager,
+            backend,
+            crate::auth::IpcAuthPolicy::default(),
+            None,
+        )
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    pub fn with_components<P: AsRef<Path>>(
+        socket_path: P,
+        data_dir: P,
+        manifest_path: Option<PathBuf>,
+        base_dir: PathBuf,
+        approval_manager: Arc<ApprovalManager>,
+        backend: Arc<dyn ExecutionBackend>,
+        auth_policy: crate::auth::IpcAuthPolicy,
+        custom_trusted_keys: Option<Arc<TrustedKeyStore>>,
+    ) -> Result<Self, Box<dyn std::error::Error>> {
         let socket_path = socket_path.as_ref().to_path_buf();
         let data_dir = data_dir.as_ref().to_path_buf();
 
@@ -78,7 +102,8 @@ impl IpcServer {
 
         let package_assessor = Arc::new(PackageSecurityAssessor::default());
         let baseline_store = Arc::new(BaselineStore::default());
-        let trusted_keys = Arc::new(TrustedKeyStore::load_default());
+        let trusted_keys =
+            custom_trusted_keys.unwrap_or_else(|| Arc::new(TrustedKeyStore::load_default()));
         let advisory_store_path = data_dir.join("advisories.json");
         let advisory_updater = Arc::new(
             AdvisoryUpdater::new(
@@ -90,6 +115,8 @@ impl IpcServer {
             )
             .with_approval_manager(Arc::clone(&approval_manager)),
         );
+
+        let rollback_manager = Arc::new(crate::auth::RollbackAuthorizationManager::new());
 
         let state = Arc::new(EngineState {
             start_time: Instant::now(),
@@ -107,6 +134,8 @@ impl IpcServer {
             manifest_path,
             base_dir,
             shutdown_requested: AtomicBool::new(false),
+            auth_policy,
+            rollback_manager,
         });
 
         Ok(Self { socket_path, state })
@@ -118,27 +147,10 @@ impl IpcServer {
 
     /// Prepares socket file, removing stale socket if present, or aborting if active.
     pub fn bind_listener(&self) -> Result<UnixListener, Box<dyn std::error::Error>> {
-        if self.socket_path.exists() {
-            // Check if existing socket is active
-            if UnixStream::connect(&self.socket_path).is_ok() {
-                return Err(format!(
-                    "Another Cyravell engine instance is already active on socket: {}",
-                    self.socket_path.display()
-                )
-                .into());
-            } else {
-                // Stale socket: safe to remove
-                std::fs::remove_file(&self.socket_path)?;
-            }
-        }
-
-        if let Some(parent) = self.socket_path.parent() {
-            std::fs::create_dir_all(parent)?;
-            std::fs::set_permissions(parent, std::fs::Permissions::from_mode(0o700))?;
-        }
+        crate::auth::verify_and_prepare_socket_path(&self.socket_path)?;
 
         let listener = UnixListener::bind(&self.socket_path)?;
-        std::fs::set_permissions(&self.socket_path, std::fs::Permissions::from_mode(0o600))?;
+        crate::auth::verify_bound_socket(&self.socket_path)?;
         listener.set_nonblocking(true)?;
 
         Ok(listener)
@@ -182,6 +194,46 @@ fn handle_client(mut stream: UnixStream, state: Arc<EngineState>) {
     let _ = stream.set_read_timeout(Some(Duration::from_secs(30)));
     let _ = stream.set_write_timeout(Some(Duration::from_secs(10)));
 
+    let peer = match crate::auth::get_peer_credentials(&stream) {
+        Ok(p) => p,
+        Err(e) => {
+            let err_resp = JsonRpcResponse::error(
+                serde_json::Value::Null,
+                -32003,
+                format!(
+                    "Authentication failure: unable to obtain peer credentials: {}",
+                    e
+                ),
+                None,
+            );
+            let _ = send_response(&mut stream, &err_resp);
+            return;
+        }
+    };
+
+    if !state.auth_policy.is_peer_allowed(&peer) {
+        let _ = state.audit.append(
+            &format!("ipc-denied-{}", uuid::Uuid::new_v4()),
+            "IPC_ACCESS_DENIED",
+            &format!(
+                "Peer UID {} PID {} denied connection to engine",
+                peer.uid, peer.pid
+            ),
+            Severity::High,
+        );
+        let err_resp = JsonRpcResponse::error(
+            serde_json::Value::Null,
+            -32003,
+            format!(
+                "Access denied: peer UID {} is not permitted to connect to this engine",
+                peer.uid
+            ),
+            None,
+        );
+        let _ = send_response(&mut stream, &err_resp);
+        return;
+    }
+
     let mut reader = BufReader::new(stream.try_clone().expect("Failed to clone socket stream"));
     let mut line_buffer = String::new();
 
@@ -206,9 +258,20 @@ fn handle_client(mut stream: UnixStream, state: Arc<EngineState>) {
                     continue;
                 }
 
+                if let Err(e) = crate::package::strict_json::validate_no_duplicate_keys(trimmed) {
+                    let err_resp = JsonRpcResponse::error(
+                        serde_json::Value::Null,
+                        -32700,
+                        format!("Parse error: duplicate key in JSON: {}", e),
+                        None,
+                    );
+                    let _ = send_response(&mut stream, &err_resp);
+                    continue;
+                }
+
                 let request: Result<JsonRpcRequest, _> = serde_json::from_str(trimmed);
                 let response = match request {
-                    Ok(req) => dispatch_request(req, &state),
+                    Ok(req) => dispatch_request(req, &state, &peer),
                     Err(e) => JsonRpcResponse::error(
                         serde_json::Value::Null,
                         -32700,
@@ -243,8 +306,45 @@ fn send_response(stream: &mut UnixStream, response: &JsonRpcResponse) -> std::io
     stream.flush()
 }
 
-fn dispatch_request(req: JsonRpcRequest, state: &Arc<EngineState>) -> JsonRpcResponse {
+fn dispatch_request(
+    req: JsonRpcRequest,
+    state: &Arc<EngineState>,
+    peer: &crate::auth::PeerCredentials,
+) -> JsonRpcResponse {
     let id = req.id.clone();
+
+    // Envelope validation
+    if req.jsonrpc != "2.0" {
+        return JsonRpcResponse::error(
+            id,
+            -32600,
+            "Invalid Request: jsonrpc must be '2.0'".to_string(),
+            None,
+        );
+    }
+    if req.method.trim().is_empty() {
+        return JsonRpcResponse::error(
+            id,
+            -32600,
+            "Invalid Request: method cannot be empty".to_string(),
+            None,
+        );
+    }
+
+    // Per-operation authorization check
+    if let Err(e) = state.auth_policy.authorize_operation(&req.method, peer) {
+        let _ = state.audit.append(
+            &format!("ipc-op-denied-{}", uuid::Uuid::new_v4()),
+            "IPC_OPERATION_DENIED",
+            &format!(
+                "Peer UID {} denied operation '{}': {}",
+                peer.uid, req.method, e
+            ),
+            Severity::High,
+        );
+        return JsonRpcResponse::error(id, -32003, format!("Operation denied: {}", e), None);
+    }
+
     match req.method.as_str() {
         "engine.handshake" => {
             let res = HandshakeResult {
@@ -1311,13 +1411,31 @@ fn dispatch_request(req: JsonRpcRequest, state: &Arc<EngineState>) -> JsonRpcRes
                 );
             }
 
-            // TOCTOU Manifest Fingerprint Verification
-            if let Some(ref orig_fp) = approved_req.manifest_fingerprint {
-                let working_dir = working_path.unwrap_or_else(|| Path::new("."));
-                if let Some(current_pkg) = state
-                    .package_assessor
-                    .assess_command_string(&sanitized, working_dir)
-                {
+            // Package Hard-Block / Tombstone / Malicious guard & TOCTOU Manifest Fingerprint Verification
+            let working_dir = working_path.unwrap_or_else(|| Path::new("."));
+            if let Some(current_pkg) = state
+                .package_assessor
+                .assess_command_string(&sanitized, working_dir)
+            {
+                if current_pkg.findings.iter().any(|f| f.is_malicious) {
+                    let _ = state.audit.append(
+                        &format!("gate-pkgblock-{}", uuid::Uuid::new_v4()),
+                        "GATE_MALICIOUS_PACKAGE_BLOCKED_BEFORE_DISPATCH",
+                        &format!(
+                            "Request: {}, Command: {}, Reason: Active advisory database identified malicious package target",
+                            dispatch_params.request_id, sanitized
+                        ),
+                        Severity::Critical,
+                    );
+                    return JsonRpcResponse::error(
+                        id,
+                        -32004,
+                        "Policy violation: Command targets malicious package and cannot be dispatched".to_string(),
+                        None,
+                    );
+                }
+
+                if let Some(ref orig_fp) = approved_req.manifest_fingerprint {
                     if let Some(ref current_fp) = current_pkg.manifest_fingerprint {
                         if current_fp != orig_fp {
                             let _ = state.audit.append(
@@ -1979,6 +2097,122 @@ fn dispatch_request(req: JsonRpcRequest, state: &Arc<EngineState>) -> JsonRpcRes
             }
         }
 
+        "package.request_rollback_authorization" => {
+            let params = match req.params {
+                Some(p) => p,
+                None => {
+                    return JsonRpcResponse::error(
+                        id,
+                        -32602,
+                        "Missing params for package.request_rollback_authorization".to_string(),
+                        None,
+                    )
+                }
+            };
+
+            let p: PackageRequestRollbackAuthorizationParams = match serde_json::from_value(params)
+            {
+                Ok(parsed) => parsed,
+                Err(e) => {
+                    return JsonRpcResponse::error(
+                        id,
+                        -32602,
+                        "Invalid params format for package.request_rollback_authorization"
+                            .to_string(),
+                        Some(e.to_string()),
+                    )
+                }
+            };
+
+            if p.confirmation_phrase != "CONFIRM_ADVISORY_ROLLBACK" {
+                return JsonRpcResponse::error(
+                    id,
+                    -32008,
+                    "Invalid confirmation phrase (must match 'CONFIRM_ADVISORY_ROLLBACK')"
+                        .to_string(),
+                    None,
+                );
+            }
+
+            if p.reason.trim().len() < 8 {
+                return JsonRpcResponse::error(
+                    id,
+                    -32602,
+                    "Rollback reason must be at least 8 characters long".to_string(),
+                    None,
+                );
+            }
+
+            let path = Path::new(&p.bundle_path);
+            let bundle = match crate::package::AdvisoryBundle::from_file(path) {
+                Ok(b) => b,
+                Err(e) => {
+                    return JsonRpcResponse::error(
+                        id,
+                        -32007,
+                        format!(
+                            "Failed to load advisory bundle for rollback authorization: {}",
+                            e
+                        ),
+                        None,
+                    );
+                }
+            };
+
+            if bundle.database_version != p.target_version {
+                return JsonRpcResponse::error(
+                    id,
+                    -32008,
+                    format!(
+                        "Target version mismatch: requested '{}' but bundle is '{}'",
+                        p.target_version, bundle.database_version
+                    ),
+                    None,
+                );
+            }
+
+            // Cryptographically verify bundle with trusted keys (allowing rollback flag for validation)
+            if let Err(e) = bundle.validate_and_authenticate(&state.trusted_keys, None, true) {
+                return JsonRpcResponse::error(
+                    id,
+                    -32007,
+                    format!(
+                        "Cryptographic bundle verification failed for rollback: {}",
+                        e
+                    ),
+                    None,
+                );
+            }
+
+            // Issue single-use token with 60-second TTL
+            let token = state.rollback_manager.issue_token(
+                peer.uid,
+                p.target_version.clone(),
+                bundle.payload_digest.clone(),
+                p.reason.clone(),
+                60,
+            );
+
+            let _ = state.audit.append(
+                &format!("adv-rb-req-{}", uuid::Uuid::new_v4()),
+                "PACKAGE_ADVISORY_ROLLBACK_REQUESTED",
+                &format!(
+                    "Rollback token issued: target_version={}, reason={}, peer_uid={}",
+                    p.target_version, p.reason, peer.uid
+                ),
+                Severity::High,
+            );
+
+            let res = PackageRequestRollbackAuthorizationResult {
+                rollback_authorization_token: token,
+                target_version: p.target_version,
+                expires_in_seconds: 60,
+                message: "Rollback authorization token issued successfully. Valid for 60 seconds."
+                    .to_string(),
+            };
+            JsonRpcResponse::success(id, serde_json::to_value(res).unwrap())
+        }
+
         "package.import_advisory_bundle" => {
             let params = match req.params {
                 Some(p) => p,
@@ -2004,28 +2238,98 @@ fn dispatch_request(req: JsonRpcRequest, state: &Arc<EngineState>) -> JsonRpcRes
                 }
             };
 
-            // Rollback override protection against unauthenticated IPC callers
-            if p.allow_rollback
-                && p.rollback_confirmation_token.as_deref() != Some("CONFIRM_ADVISORY_ROLLBACK")
-            {
+            let path = Path::new(&p.bundle_path);
+
+            // Two-phase rollback authorization check
+            if p.allow_rollback {
+                if p.rollback_confirmation_token.as_deref() != Some("CONFIRM_ADVISORY_ROLLBACK") {
+                    let _ = state.audit.append(
+                        &format!("adv-rb-unauth-{}", uuid::Uuid::new_v4()),
+                        "PACKAGE_ADVISORY_ROLLBACK_ATTEMPTED",
+                        &format!(
+                            "Unauthenticated rollback override attempted over IPC for bundle '{}'",
+                            p.bundle_path
+                        ),
+                        Severity::High,
+                    );
+                    return JsonRpcResponse::error(
+                        id,
+                        -32008,
+                        "Rollback override rejected: confirmation token 'CONFIRM_ADVISORY_ROLLBACK' is required.".to_string(),
+                        None,
+                    );
+                }
+
+                let token = match p.rollback_authorization_token.as_deref() {
+                    Some(t) if !t.trim().is_empty() => t,
+                    _ => {
+                        let _ = state.audit.append(
+                            &format!("adv-rb-notoken-{}", uuid::Uuid::new_v4()),
+                            "PACKAGE_ADVISORY_ROLLBACK_ATTEMPTED",
+                            &format!(
+                                "Rollback attempted without authorization token for bundle '{}'",
+                                p.bundle_path
+                            ),
+                            Severity::High,
+                        );
+                        return JsonRpcResponse::error(
+                            id,
+                            -32008,
+                            "Rollback override rejected: missing rollback_authorization_token. Request authorization first via package.request_rollback_authorization.".to_string(),
+                            None,
+                        );
+                    }
+                };
+
+                let bundle = match crate::package::AdvisoryBundle::from_file(path) {
+                    Ok(b) => b,
+                    Err(e) => {
+                        return JsonRpcResponse::error(
+                            id,
+                            -32007,
+                            format!("Failed to load bundle for rollback import: {}", e),
+                            None,
+                        );
+                    }
+                };
+
+                let auth = match state.rollback_manager.consume_token(
+                    token,
+                    peer.uid,
+                    &bundle.database_version,
+                    &bundle.payload_digest,
+                ) {
+                    Ok(a) => a,
+                    Err(e) => {
+                        let _ = state.audit.append(
+                            &format!("adv-rb-rej-{}", uuid::Uuid::new_v4()),
+                            "PACKAGE_ADVISORY_ROLLBACK_REJECTED",
+                            &format!(
+                                "Rollback authorization rejected for bundle '{}': {}",
+                                p.bundle_path, e
+                            ),
+                            Severity::High,
+                        );
+                        return JsonRpcResponse::error(
+                            id,
+                            -32008,
+                            format!("Rollback authorization rejected: {}", e),
+                            None,
+                        );
+                    }
+                };
+
                 let _ = state.audit.append(
-                    &format!("adv-rb-unauth-{}", uuid::Uuid::new_v4()),
-                    "PACKAGE_ADVISORY_ROLLBACK_ATTEMPTED",
+                    &format!("adv-rb-ok-{}", uuid::Uuid::new_v4()),
+                    "PACKAGE_ADVISORY_ROLLBACK_AUTHORIZED",
                     &format!(
-                        "Unauthenticated rollback override attempted over IPC for bundle '{}'",
-                        p.bundle_path
+                        "Rollback authorization verified and consumed: target_version={}, reason={}, peer_uid={}",
+                        auth.target_version, auth.reason, peer.uid
                     ),
                     Severity::High,
                 );
-                return JsonRpcResponse::error(
-                    id,
-                    -32008,
-                    "Rollback override rejected: unauthenticated or unconfirmed rollback attempt over IPC. Explicit confirmation token is required.".to_string(),
-                    None,
-                );
             }
 
-            let path = Path::new(&p.bundle_path);
             match state.advisory_updater.import_bundle(path, p.allow_rollback) {
                 Ok(import_res) => {
                     JsonRpcResponse::success(id, serde_json::to_value(import_res).unwrap())

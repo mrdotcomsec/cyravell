@@ -9,6 +9,7 @@ use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use std::cmp::Ordering;
 use std::collections::HashSet;
+use std::path::Path;
 
 pub const CYRAVELL_ENGINE_VERSION: &str = "0.2.7";
 pub const SUPPORTED_BUNDLE_FORMAT: &str = "1.0";
@@ -234,6 +235,16 @@ pub fn is_engine_compatible(min_cyravell: &str, current_engine: &str) -> bool {
 }
 
 impl AdvisoryBundle {
+    pub fn from_file<P: AsRef<Path>>(path: P) -> Result<Self, BundleValidationError> {
+        let content = std::fs::read_to_string(path)
+            .map_err(|e| BundleValidationError::MalformedRecord(e.to_string()))?;
+        crate::package::strict_json::validate_no_duplicate_keys(&content)
+            .map_err(BundleValidationError::MalformedRecord)?;
+        let bundle: Self = serde_json::from_str(&content)
+            .map_err(|e| BundleValidationError::MalformedRecord(e.to_string()))?;
+        Ok(bundle)
+    }
+
     pub fn canonical_signing_bytes(&self) -> Vec<u8> {
         let mut sorted_ecosystems = self.supported_ecosystems.clone();
         sorted_ecosystems.sort_by(|a, b| a.as_str().cmp(b.as_str()));

@@ -445,6 +445,7 @@ fn test_07_rollback_override_abuse_cli_and_ipc() {
         bundle_path: "/tmp/bundle.json".to_string(),
         keys_path: None,
         allow_rollback: true,
+        rollback_authorization_token: None,
         rollback_confirmation_token: None,
     };
     assert!(params.allow_rollback);
@@ -455,6 +456,7 @@ fn test_07_rollback_override_abuse_cli_and_ipc() {
         bundle_path: "/tmp/bundle.json".to_string(),
         keys_path: None,
         allow_rollback: true,
+        rollback_authorization_token: Some("cyr-rollback-test-token".to_string()),
         rollback_confirmation_token: Some("CONFIRM_ADVISORY_ROLLBACK".to_string()),
     };
     assert_eq!(

@@ -61,16 +61,19 @@ All communications follow a structured Request-Response model. Every request inc
 ```
 
 Standard Error Codes:
-- `-32700`: Parse error (invalid JSON)
-- `-32600`: Invalid request (missing required fields or oversized frame)
+- `-32700`: Parse error (invalid JSON or duplicate keys detected)
+- `-32600`: Invalid request (missing required envelope fields, empty method, or oversized frame > 1 MiB)
 - `-32601`: Method not found
-- `-32602`: Invalid params (schema version mismatch, validation error)
+- `-32602`: Invalid params (schema version mismatch, missing parameters, invalid formats)
 - `-32603`: Internal engine error
-- `-32001`: Policy evaluation failure
+- `-32001`: Policy evaluation / authorization token validation failure
 - `-32002`: Audit verification failure
+- `-32003`: Authentication or Authorization denied (peer UID mismatch or operation requires higher privilege tier)
 - `-32004`: Hard block violation (confirmed malicious package cannot be approved or dispatched)
 - `-32005`: Manifest modified after approval (TOCTOU integrity check failed)
 - `-32006`: Active drift block or unverified baseline transition denied
+- `-32007`: Bundle verification, cryptographic signature, digest, or schema validation failed
+- `-32008`: Rollback override rejected (missing rollback token, token replay, token expired, UID mismatch, or version/digest mismatch)
 
 ---
 
@@ -941,6 +944,60 @@ Authenticates, validates, atomically persists, and activates an advisory update 
 **Common Error Codes:**
 - `-32602`: Missing or invalid params format.
 - `-32007`: Bundle verification, signature, digest, duplicate key, or schema validation failed.
-- `-32008`: Rollback override rejected: unauthenticated or unconfirmed rollback attempt over IPC (requires `"CONFIRM_ADVISORY_ROLLBACK"`).
+- `-32008`: Rollback override rejected: missing rollback token, token replay, token expired, UID mismatch, or version/digest mismatch.
+
+---
+
+### 3.24 `package.request_rollback_authorization`
+Requests a time-limited (60-second TTL), single-use cryptographic rollback authorization token to permit downgrading the package advisory database.
+
+**Privilege Tier:** `Privileged`
+
+**Request:**
+```json
+{
+  "jsonrpc": "2.0",
+  "id": "21",
+  "method": "package.request_rollback_authorization",
+  "params": {
+    "bundle_path": "/var/lib/cyravell/bundles/advisory_bundle_v2026.04.1.json",
+    "target_version": "2026.04.1",
+    "reason": "Emergency operational mitigation for critical false positive",
+    "confirmation_phrase": "CONFIRM_ADVISORY_ROLLBACK"
+  }
+}
+```
+
+**Response:**
+```json
+{
+  "jsonrpc": "2.0",
+  "id": "21",
+  "result": {
+    "rollback_authorization_token": "cyr-rollback-550e8400-e29b-41d4-a716-446655440000-6ba7b810-9dad-11d1-80b4-00c04fd430c8",
+    "target_version": "2026.04.1",
+    "expires_in_seconds": 60,
+    "message": "Rollback authorization token issued successfully. Valid for 60 seconds."
+  }
+}
+```
+
+**Common Error Codes:**
+- `-32003`: Caller lacks `Privileged` tier authorization.
+- `-32007`: Candidate bundle is missing, corrupted, or failed cryptographic signature verification.
+- `-32008`: Target version mismatch or invalid confirmation phrase (must be `"CONFIRM_ADVISORY_ROLLBACK"`).
+- `-32602`: Reason too short (minimum 8 characters required).
+
+---
+
+## 4. Operation Authorization Tiers & Method Matrix
+
+| Privilege Tier | Allowed Methods | Access Requirements |
+| :--- | :--- | :--- |
+| **`ReadOnly`** | `engine.handshake`, `engine.get_health`, `engine.get_integrity`, `command.analyze`, `approval.get_pending`, `event.get_recent`, `event.get_details`, `audit.verify`, `package.get_baseline`, `package.detect_drift`, `package.get_advisory_status`, `package.inspect_advisory_bundle` | Allowed for engine owner and permitted non-owner read peers. |
+| **`Standard`** | `gate.evaluate`, `gate.record_outcome`, `event.submit`, `package.create_baseline`, `package.verify_post_operation`, `package.monitor_workspace` | Normal agent operation; requires owner UID or explicitly authorized peer. |
+| **`Privileged`** | `approval.decide`, `gate.dispatch_authorized`, `package.import_advisory_bundle`, `package.request_rollback_authorization`, `engine.shutdown` | Requires engine owner UID. Cannot be invoked by non-owner peers. |
+| **`Rollback`** | Rollback override operations within `package.import_advisory_bundle` | Requires valid, unconsumed token issued by `package.request_rollback_authorization`. |
+
 
 

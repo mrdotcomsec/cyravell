@@ -145,6 +145,15 @@ async function runTests() {
     console.log('  ✓ importAdvisoryBundle fails safely when disconnected');
   }
 
+  // Test 18: requestRollbackAuthorization throws if engine is disconnected
+  try {
+    await client.requestRollbackAuthorization('/tmp/test-bundle.json', '1.0.0', 'Rollback due to emergency fix');
+    assert.fail('Expected error when requesting rollback authorization while disconnected');
+  } catch (e) {
+    assert.ok(e.message.includes('not connected'), 'Must throw not connected error');
+    console.log('  ✓ requestRollbackAuthorization fails safely when disconnected');
+  }
+
   console.log('✓ All extension client tests passed successfully!');
 }
 

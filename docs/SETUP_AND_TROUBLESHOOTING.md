@@ -462,9 +462,42 @@ Trusted public signing keys are configured in `rules/trusted_keys.json`:
 - **Error: `Trust store path '...' is world-writable`:**
   - **Cause:** File permissions allow arbitrary local write access.
   - **Resolution:** Restrict permissions: `chmod 644 rules/trusted_keys.json`.
-- **Error: `Rollback override rejected: unauthenticated or unconfirmed rollback attempt over IPC` (Code `-32008`):**
-  - **Cause:** An IPC client specified `allow_rollback: true` without supplying the mandatory `rollback_confirmation_token: "CONFIRM_ADVISORY_ROLLBACK"`.
-  - **Resolution:** Pass `--allow-rollback` via CLI, or ensure the IPC request explicitly includes `rollback_confirmation_token: "CONFIRM_ADVISORY_ROLLBACK"`.
+
+---
+
+## 13. Phase 2.9: IPC Authorization, Local Access Control, and Privilege Hardening
+
+### 13.1 Socket and Runtime Directory Security
+Cyravell's engine verifies operating system identity and filesystem security invariants before binding or accepting connections:
+- **Parent Directory (`0700`):** The socket parent directory (`/run/user/<UID>/cyravell` or `~/.local/share/cyravell`) must be owned by the engine's effective user ID (`EUID`), must have restrictive mode `0700` (`rwx------`), and must **not** be a symbolic link or world-writable.
+- **Socket File (`0600`):** The bound socket file is set to mode `0600` (`rw-------`) and verified.
+- **Stale Socket Handling:** If an old socket file exists, Cyravell tests whether another live engine instance is listening. If an instance is active, startup safely aborts with `AddrInUse`. If the socket is dead, Cyravell verifies it is owned by the current EUID, is a genuine socket file (not a symlink or regular file), and removes it safely.
+
+### 13.2 Peer Credentials and Operation Tiers
+- **Authentication via Kernel:** On Linux, client credentials (`pid`, `uid`, `gid`) are extracted directly from the socket via `SO_PEERCRED`. Any claimed identity passed in request JSON bodies is ignored.
+- **Operation Tiers:**
+  - `ReadOnly`: Queries, analysis, status checks, and drift monitoring.
+  - `Standard`: Gate evaluations, baseline creation, post-op verification.
+  - `Privileged`: Approvals (`approval.decide`), dispatch (`gate.dispatch_authorized`), advisory bundle imports, and engine shutdown.
+  - `Rollback`: Tokenized advisory database rollback overrides.
+
+### 13.3 Troubleshooting IPC Authorization Errors
+- **Error: `Access denied: peer UID ... is not permitted to connect to this engine` (Code `-32003`):**
+  - **Cause:** A process running under a different user ID attempted to connect to the engine Unix domain socket.
+  - **Resolution:** Ensure the client process (VS Code, terminal, or script) runs under the same user account as the `cyravell-engine` daemon.
+- **Error: `Operation '...' requires privileged authorization; peer UID ... lacks required privilege` (Code `-32003`):**
+  - **Cause:** A peer allowed only for `ReadOnly` access attempted a modifying or sensitive command (`approval.decide`, `gate.dispatch_authorized`, or `package.import_advisory_bundle`).
+  - **Resolution:** Run privileged administrative operations from the engine owner's account or via the owner's VS Code session.
+- **Error: `Rollback override rejected: missing rollback_authorization_token` (Code `-32008`):**
+  - **Cause:** An advisory import specified `allow_rollback: true` without obtaining a rollback authorization token.
+  - **Resolution:** Request authorization first via `package.request_rollback_authorization` (or use `cyravell-engine package import --allow-rollback --reason "..."` which handles token negotiation automatically).
+- **Error: `Rollback authorization rejected: Rollback authorization token has already been consumed` (Code `-32008`):**
+  - **Cause:** Token replay attempt. Rollback authorization tokens are strictly single-use.
+  - **Resolution:** Issue a new rollback authorization request to obtain a fresh token.
+- **Error: `Parent directory '...' is a symbolic link` or `world-writable`:**
+  - **Cause:** Insecure permissions or symlink attack detected in the socket directory hierarchy.
+  - **Resolution:** Create a dedicated private directory: `mkdir -p ~/.local/share/cyravell && chmod 700 ~/.local/share/cyravell`.
+
 
 
 

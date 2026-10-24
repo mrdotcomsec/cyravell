@@ -918,7 +918,25 @@ pub struct PackageImportAdvisoryBundleParams {
     #[serde(default)]
     pub allow_rollback: bool,
     #[serde(default)]
+    pub rollback_authorization_token: Option<String>,
+    #[serde(default)]
     pub rollback_confirmation_token: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct PackageRequestRollbackAuthorizationParams {
+    pub bundle_path: String,
+    pub target_version: String,
+    pub reason: String,
+    pub confirmation_phrase: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct PackageRequestRollbackAuthorizationResult {
+    pub rollback_authorization_token: String,
+    pub target_version: String,
+    pub expires_in_seconds: i64,
+    pub message: String,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

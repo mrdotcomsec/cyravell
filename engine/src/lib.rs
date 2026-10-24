@@ -3,6 +3,7 @@
 
 pub mod analysis;
 pub mod audit;
+pub mod auth;
 pub mod gate;
 pub mod integrity;
 pub mod ipc;
@@ -10,8 +11,15 @@ pub mod model;
 pub mod package;
 pub mod policy;
 
+#[cfg(test)]
+mod ipc_auth_tests;
+
 pub use analysis::CommandAnalyzer;
 pub use audit::AuditLog;
+pub use auth::{
+    get_peer_credentials, IpcAuthPolicy, OperationTier, PeerAccessRule, PeerCredentials,
+    RollbackAuthError, RollbackAuthorization, RollbackAuthorizationManager,
+};
 pub use gate::{
     ControlledShell, ExecutionBackend, ExecutionError, ExecutionGate, GateEngineClient,
     MockExecutionBackend, OsExecutionBackend,

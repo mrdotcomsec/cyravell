@@ -13,7 +13,8 @@ use cyravell_engine::{
     model::{
         AdvisoryStatus, BundleImportResult, BundleInspectionResult, JsonRpcRequest,
         JsonRpcResponse, PackageGetAdvisoryStatusResult, PackageImportAdvisoryBundleParams,
-        PackageInspectAdvisoryBundleParams,
+        PackageInspectAdvisoryBundleParams, PackageRequestRollbackAuthorizationParams,
+        PackageRequestRollbackAuthorizationResult,
     },
     package::{
         AdvisoryBundle, AdvisoryDatabase, AdvisoryUpdater, BaselineStore, PackageSecurityAssessor,
@@ -709,6 +710,50 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 let bundle_path_str = bundle.to_string_lossy().to_string();
                 let ipc_res = (|| -> Result<BundleImportResult, Box<dyn std::error::Error>> {
                     let mut stream = UnixStream::connect(&socket_path)?;
+                    let mut reader = BufReader::new(stream.try_clone()?);
+
+                    let mut rollback_auth_token = None;
+                    if allow_rollback {
+                        let content = std::fs::read_to_string(&bundle)?;
+                        let val: serde_json::Value = serde_json::from_str(&content)?;
+                        let target_version = val
+                            .get("database_version")
+                            .and_then(|v| v.as_str())
+                            .unwrap_or("")
+                            .to_string();
+
+                        let req_token = JsonRpcRequest {
+                            jsonrpc: "2.0".to_string(),
+                            id: serde_json::json!(0),
+                            method: "package.request_rollback_authorization".to_string(),
+                            params: Some(serde_json::to_value(
+                                PackageRequestRollbackAuthorizationParams {
+                                    bundle_path: bundle_path_str.clone(),
+                                    target_version,
+                                    reason:
+                                        "CLI administrative advisory rollback requested by operator"
+                                            .to_string(),
+                                    confirmation_phrase: "CONFIRM_ADVISORY_ROLLBACK".to_string(),
+                                },
+                            )?),
+                        };
+                        stream.write_all(&serde_json::to_vec(&req_token)?)?;
+                        stream.write_all(b"\n")?;
+                        stream.flush()?;
+                        let mut line = String::new();
+                        reader.read_line(&mut line)?;
+                        let resp: JsonRpcResponse = serde_json::from_str(&line)?;
+                        if let Some(res) = resp.result {
+                            let auth_res: PackageRequestRollbackAuthorizationResult =
+                                serde_json::from_value(res)?;
+                            rollback_auth_token = Some(auth_res.rollback_authorization_token);
+                        } else if let Some(err) = resp.error {
+                            return Err(
+                                format!("Rollback authorization failed: {}", err.message).into()
+                            );
+                        }
+                    }
+
                     let req = JsonRpcRequest {
                         jsonrpc: "2.0".to_string(),
                         id: serde_json::json!(1),
@@ -717,6 +762,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                             bundle_path: bundle_path_str.clone(),
                             keys_path: None,
                             allow_rollback,
+                            rollback_authorization_token: rollback_auth_token,
                             rollback_confirmation_token: if allow_rollback {
                                 Some("CONFIRM_ADVISORY_ROLLBACK".to_string())
                             } else {
@@ -727,7 +773,6 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                     stream.write_all(&serde_json::to_vec(&req)?)?;
                     stream.write_all(b"\n")?;
                     stream.flush()?;
-                    let mut reader = BufReader::new(stream);
                     let mut line = String::new();
                     reader.read_line(&mut line)?;
                     let resp: JsonRpcResponse = serde_json::from_str(&line)?;

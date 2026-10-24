@@ -19,6 +19,8 @@ pub enum AuditError {
     Io(std::io::Error),
     Json(serde_json::Error),
     VerificationFailure { sequence: u64, reason: String },
+    InsecurePermissions(String),
+    SymlinkForbidden(String),
 }
 
 impl fmt::Display for AuditError {
@@ -33,6 +35,8 @@ impl fmt::Display for AuditError {
                     sequence, reason
                 )
             }
+            Self::InsecurePermissions(msg) => write!(f, "Audit insecure permissions: {}", msg),
+            Self::SymlinkForbidden(msg) => write!(f, "Audit symlink forbidden: {}", msg),
         }
     }
 }
@@ -43,6 +47,8 @@ impl std::error::Error for AuditError {
             Self::Io(e) => Some(e),
             Self::Json(e) => Some(e),
             Self::VerificationFailure { .. } => None,
+            Self::InsecurePermissions(_) => None,
+            Self::SymlinkForbidden(_) => None,
         }
     }
 }
@@ -73,12 +79,56 @@ impl AuditLog {
     /// Opens or creates the append-only audit log file with restrictive permissions.
     pub fn open<P: AsRef<Path>>(path: P) -> Result<Self, AuditError> {
         let path = path.as_ref().to_path_buf();
-        if let Some(parent) = path.parent() {
-            std::fs::create_dir_all(parent)?;
-            #[cfg(unix)]
-            {
-                use std::os::unix::fs::PermissionsExt;
-                let _ = std::fs::set_permissions(parent, std::fs::Permissions::from_mode(0o700));
+
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::MetadataExt;
+            use std::os::unix::fs::PermissionsExt;
+
+            if let Some(parent) = path.parent() {
+                if !parent.exists() {
+                    std::fs::create_dir_all(parent)?;
+                    let _ =
+                        std::fs::set_permissions(parent, std::fs::Permissions::from_mode(0o700));
+                } else {
+                    let pmeta = std::fs::symlink_metadata(parent)?;
+                    if pmeta.file_type().is_symlink() {
+                        return Err(AuditError::SymlinkForbidden(format!(
+                            "Audit parent directory '{}' is a symlink",
+                            parent.display()
+                        )));
+                    }
+                    if pmeta.mode() & 0o002 != 0 {
+                        return Err(AuditError::InsecurePermissions(format!(
+                            "Audit parent directory '{}' is world-writable (mode {:o})",
+                            parent.display(),
+                            pmeta.mode()
+                        )));
+                    }
+                }
+            }
+
+            if std::fs::symlink_metadata(&path).is_ok() {
+                let meta = std::fs::symlink_metadata(&path)?;
+                if meta.file_type().is_symlink() {
+                    return Err(AuditError::SymlinkForbidden(format!(
+                        "Audit log file '{}' is a symlink",
+                        path.display()
+                    )));
+                }
+                if meta.mode() & 0o002 != 0 {
+                    return Err(AuditError::InsecurePermissions(format!(
+                        "Audit log file '{}' is world-writable (mode {:o})",
+                        path.display(),
+                        meta.mode()
+                    )));
+                }
+            }
+        }
+        #[cfg(not(unix))]
+        {
+            if let Some(parent) = path.parent() {
+                std::fs::create_dir_all(parent)?;
             }
         }
 
@@ -139,6 +189,27 @@ impl AuditLog {
         };
 
         // Write record as single line JSON to log file with mode 0600 on creation
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::MetadataExt;
+            if std::fs::symlink_metadata(&self.file_path).is_ok() {
+                let meta = std::fs::symlink_metadata(&self.file_path)?;
+                if meta.file_type().is_symlink() {
+                    return Err(AuditError::SymlinkForbidden(format!(
+                        "Audit log file '{}' is a symlink",
+                        self.file_path.display()
+                    )));
+                }
+                if meta.mode() & 0o002 != 0 {
+                    return Err(AuditError::InsecurePermissions(format!(
+                        "Audit log file '{}' is world-writable (mode {:o})",
+                        self.file_path.display(),
+                        meta.mode()
+                    )));
+                }
+            }
+        }
+
         let serialized = serde_json::to_string(&record)?;
         let mut options = OpenOptions::new();
         options.create(true).append(true);

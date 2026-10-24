@@ -626,11 +626,33 @@ export class EngineClient extends EventEmitter {
     });
   }
 
+  public async requestRollbackAuthorization(
+    bundlePath: string,
+    targetVersion: string,
+    reason: string
+  ): Promise<{
+    rollback_authorization_token: string;
+    target_version: string;
+    expires_in_seconds: number;
+    message: string;
+  }> {
+    if (this.state !== 'CONNECTED') {
+      throw new Error('Engine is not connected');
+    }
+    return this.call('package.request_rollback_authorization', {
+      bundle_path: bundlePath,
+      target_version: targetVersion,
+      reason,
+      confirmation_phrase: 'CONFIRM_ADVISORY_ROLLBACK',
+    });
+  }
+
   public async importAdvisoryBundle(
     bundlePath: string,
     allowRollback: boolean = false,
     keysPath?: string,
-    rollbackConfirmationToken?: string
+    rollbackConfirmationToken?: string,
+    rollbackAuthorizationToken?: string
   ): Promise<BundleImportResult> {
     if (this.state !== 'CONNECTED') {
       throw new Error('Engine is not connected');
@@ -641,6 +663,7 @@ export class EngineClient extends EventEmitter {
       keys_path: keysPath,
       rollback_confirmation_token:
         rollbackConfirmationToken || (allowRollback ? 'CONFIRM_ADVISORY_ROLLBACK' : undefined),
+      rollback_authorization_token: rollbackAuthorizationToken,
     });
   }
 

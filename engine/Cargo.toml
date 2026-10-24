@@ -23,6 +23,7 @@ chrono = { version = "0.4", features = ["serde"] }
 clap = { version = "4.5", features = ["derive"] }
 uuid = { version = "1.8", features = ["v4", "serde"] }
 ed25519-dalek = { version = "2.1", features = ["rand_core"] }
+libc = "0.2"
 
 [dev-dependencies]
 tempfile = "3.10"
