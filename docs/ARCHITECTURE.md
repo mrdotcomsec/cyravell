@@ -490,6 +490,67 @@ The update workflow implemented in `AdvisoryUpdater` guarantees atomic all-or-no
 - **Embedded Clean Fallback:** If the external persistent database file is corrupted, truncated, or unreadable, `AdvisoryDatabase::load_with_fallback` automatically activates the embedded clean intelligence bundled inside the engine binary.
 - **Distinction Between Authenticity and Accuracy:** A verified Ed25519 signature proves the bundle was published by a trusted authority; Cyravell treats advisory intelligence as defense-in-depth risk heuristics rather than infallible proofs of complete software safety.
 
+---
+
+## 12. Adversarial Trust, Rollback, and Recovery Validation (Phase 2.8)
+
+Cyravell Phase 2.8 hardens the signed advisory update system against adversarial inputs, filesystem attacks, concurrency races, interrupted operations, and trust compromise.
+
+```
+┌─────────────────────────────────────────────────────────────────────────────┐
+│                    Phase 2.8 Hardened Trust Architecture                    │
+└─────────────────────────────────────────────────────────────────────────────┘
+  [ Candidate Bundle ] ──► [ Strict JSON Checker ] (Rejects Duplicate Keys)
+          │
+          ▼
+  [ TrustedKeyStore ]  ──► [ Filesystem Guard ] (Rejects Symlinks & World-Writable)
+          │                 (Explicit Unsafe Status on Corruption, No Silent Fallback)
+          ▼
+  [ Signature Verify ] ──► [ Full Metadata Binding ] (Format, DB, Created, Publisher,
+          │                 Key, Engine Min, Supported Ecosystems, Payload Digest)
+          ▼
+  [ Rollback Guard ]   ──► [ Persistent High-Water Mark ] (Survives Restarts & Deletions)
+          │                 (IPC Rollback Requires Explicit Confirmation Token)
+          ▼
+  [ Approval Guard ]   ──► [ Pending & Token Revocation ] (Destroys Unconsumed Tokens)
+          │
+          ▼
+  [ Tombstone State ]  ──► [ Irreversible Malicious Registry ] (Survives DB Rollback)
+          │
+          ▼
+  [ Atomic Storage ]   ──► [ O_EXCL / 0600 Temp File ] + Atomic Rename + Directory Sync
+```
+
+### 12.1 Strict JSON Parsing & Duplicate Key Rejection
+- **The Ambiguity Vulnerability:** Standard JSON parsers typically overwrite duplicate keys, allowing attackers to construct payloads that differ between verification and execution.
+- **Strict Verification (`strict_json.rs`):** A recursive deserializer visitor inspects candidate bundles and trust store files before deserialization. Any document containing duplicate keys at any nesting level is immediately rejected with an explicit error.
+
+### 12.2 Hardened Trust-Store Integrity & Explicit Failure
+- **Symlink & Permission Enforcement:** `TrustedKeyStore::load_from_path` inspects `symlink_metadata()`. If the file is a symbolic link, or world-writable (`mode & 0o002 != 0`), loading is aborted with `KeyStoreError::SymlinkForbidden` or `KeyStoreError::InsecurePermissions`.
+- **No Silent Fallback on Corruption:** If `rules/trusted_keys.json` is present on disk but corrupted, tampered with, or malformed, `load_default()` transitions the keystore to `TrustStoreStatus::Corrupted`. The engine marks trust configuration as unavailable and fails closed on all signature verifications, preventing silent fallback to embedded defaults.
+- **Publisher Identity Binding:** The bundle publisher must strictly match the publisher identity bound to the key in the trust store. A valid signature from Key A cannot authenticate a bundle claiming to be from Publisher B.
+
+### 12.3 Monotonic Anti-Rollback High-Water Mark
+- **Durable Version Barrier (`advisory_security_state.json`):** A separate, hardened state store records the highest activated database version.
+- **Restart & Deletion Resilience:** If an attacker wipes `advisories.json`, the active database falls back to embedded defaults, but `high_water_version` persists in the security state. Attempting to import an intermediate older bundle is rejected by default.
+- **Numeric & Deterministic Comparison:** Version strings are strictly validated: 1 to 4 ASCII numeric segments (`u64`), rejecting ambiguous formats, negative integers, or non-numeric tokens.
+- **Privileged IPC Authorization:** Rollback overrides cannot be triggered casually over IPC. Calls with `allow_rollback: true` require `rollback_confirmation_token: Some("CONFIRM_ADVISORY_ROLLBACK")`. Unauthorized attempts trigger high-severity audit logging and return JSON-RPC error code `-32008`.
+
+### 12.4 Irreversible Malicious Package Tombstones
+- **Rollback Invariant:** If a package is ever classified as confirmed malicious in any activated bundle, it is permanently recorded in `malicious_tombstones`.
+- **Survives Rollback and DB Deletion:** Even if the advisory database is rolled back to an older version (which lacked the finding), or the external database is removed, the engine's `PackageSecurityAssessor` retains the tombstone. Any command or manifest referencing that package remains hard-blocked.
+
+### 12.5 Approval Invalidation and Token Revocation
+- **Replay Prevention:** When newly imported intelligence classifies a package as malicious:
+  1. Any matching `Pending` approval request is immediately transitioned to `Denied`.
+  2. Any matching `Approved` request whose single-use token was not yet consumed has its token destroyed (`authorization_token = None`) and its status transitioned to `Denied`.
+  3. Attempting to call `gate.dispatch_authorized` with the previously issued token fails immediately.
+
+### 12.6 Atomic Staging, Directory Sync, and Failure Recovery
+- **Collision & Symlink Protection:** Temporary files are created in the parent directory with `create_new(true)` (`O_EXCL` semantics) and restricted Unix permissions `0600`.
+- **Durability & Crash Consistency:** The file is flushed and synced (`file.sync_all()`), atomically renamed, and the parent directory is synced (`dir_file.sync_all()`).
+- **Fail-Safe Recovery:** If any error occurs during write, sync, or rename, temporary files are cleaned up and the previous active database and memory state remain 100% untouched.
+
 
 
 

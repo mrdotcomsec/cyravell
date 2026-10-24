@@ -183,6 +183,30 @@ We classify potential threat actors into the following tiers:
 - **Threat Model Boundaries & Non-Claims:**
   - **Signature Authenticity vs. Advisory Accuracy:** A valid cryptographic signature proves that a bundle originated from a trusted publisher with an authenticated private key. It does *not* prove that every advisory record is complete, bug-free, or exhaustive against all real-world malware.
 
+### 5.8 Adversarial Trust, Rollback, and Recovery Attacks (Phase 2.8)
+
+- **Threat:**
+  - **Trust-Store Symlink Hijacking / Insecure Permissions:** An attacker creates a symlink pointing to an arbitrary file or exploits world-writable permissions on `rules/trusted_keys.json` to alter trust anchors.
+  - **JSON Parser Discrepancies & Duplicate Key Attacks:** An attacker exploits duplicate keys (e.g. repeated `"key_id"` or `"is_malicious"`) where the signer, canonicalizer, and engine deserializer interpret different values.
+  - **Rollback via Active Database Deletion:** An attacker deletes `advisories.json` on disk, causing Cyravell to fall back to an older embedded version, and then imports a stale bundle without `--allow-rollback`.
+  - **Rollback Abuse via IPC:** An untrusted or compromised client connected to Cyravell's Unix domain socket sends `allow_rollback: true` to casually force database downgrade.
+  - **Approval Token Replay & Race Conditions:** An attacker obtains user approval for a package before an advisory update flags it as malicious, then redeems the single-use token after the update is activated.
+  - **Malicious Intelligence Erasure:** An attacker explicitly rolls back to an older advisory database to clear malicious-package flags and re-enable installation of known malware.
+
+- **Mitigation:**
+  - **Strict Filesystem & Permission Guard:** `TrustedKeyStore::load_from_path` inspects `symlink_metadata()`. Symlinks and world-writable files (`mode & 0o002 != 0`) are strictly rejected.
+  - **Explicit Failure Without Silent Trust:** If `rules/trusted_keys.json` is corrupted, malformed, or tampered with on disk, the engine transitions to `TrustStoreStatus::Corrupted` and fails closed on all signature verifications rather than silently falling back to embedded keys.
+  - **Strict JSON Deserialization:** `strict_json.rs` recursively enforces that no JSON document contains duplicate keys at any nesting level before parsing bundles or trust stores.
+  - **Durable Anti-Rollback High-Water Mark:** `advisory_security_state.json` persists the monotonic high-water version mark. Deleting or replacing `advisories.json` cannot reset this version barrier downward.
+  - **Privileged IPC Confirmation Token:** Calling `package.import_advisory_bundle` with `allow_rollback: true` requires `rollback_confirmation_token: Some("CONFIRM_ADVISORY_ROLLBACK")`. Unauthenticated calls are rejected with error `-32008` and logged as high-severity security events.
+  - **Active Invalidation & Token Revocation:** Activating newly discovered malicious package intelligence immediately transitions matching `Pending` and `Approved` requests to `Denied` and destroys unconsumed authorization tokens (`authorization_token = None`), preventing any replay.
+  - **Irreversible Malicious Package Tombstones:** Packages confirmed as malicious are recorded in `malicious_tombstones`. This classification survives advisory rollbacks, database deletions, and engine restarts.
+  - **O_EXCL Staging & Directory Sync:** Temporary files are created with `create_new(true)` (`O_EXCL`) and mode `0600`, followed by atomic rename and directory synchronization on Unix.
+
+- **Threat Model Boundaries & Non-Claims:**
+  - **Limits of Local File Permissions:** Cyravell protects against unprivileged processes and developer AI coding agent misbehavior. It does *not* claim to protect against an attacker with root, kernel, or physical disk modification access to the host.
+  - **Local Tamper-Evident Audit Chains:** Cyravell's SHA-256 cryptographic audit chain detects deletion or modification of records under normal operation. A root attacker who rewrites the entire log and state files cannot be stopped without external cryptographic notarization (Phase 3).
+
 ---
 
 ## 6. Security Assumptions

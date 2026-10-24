@@ -438,14 +438,33 @@ Trusted public signing keys are configured in `rules/trusted_keys.json`:
   - **Cause:** The candidate bundle was signed with a key identifier not present in `rules/trusted_keys.json`.
   - **Resolution:** Verify the bundle publisher. If legitimate, add their public key to `rules/trusted_keys.json`.
 - **Error: `Rollback rejected: candidate database version ... is not strictly newer than active version ...`:**
-  - **Cause:** Cyravell's anti-rollback protection rejects candidate bundles that are older than or equal to the current active version by default.
-  - **Resolution:** If a rollback is intentional (e.g., reverting a bad upstream release), specify `--allow-rollback` via CLI or confirm the prompt in VS Code. Note that existing active hard blocks are preserved even across rollbacks.
+  - **Cause:** Cyravell's anti-rollback protection rejects candidate bundles that are older than or equal to the current active version or monotonic high-water mark.
+  - **Resolution:** If a rollback is intentional (e.g., reverting a bad upstream release), specify `--allow-rollback` via CLI or confirm the prompt in VS Code. Note that existing active hard blocks and malicious package tombstones are permanently preserved even across rollbacks.
 - **Error: `Advisory payload digest mismatch`:**
   - **Cause:** The advisory records in the bundle do not match the signed SHA-256 `payload_digest`. The file was modified or corrupted in transit.
   - **Resolution:** Re-download or obtain an authentic, uncorrupted bundle from the publisher.
 - **Error: `Synthetic test fixture contamination detected: record '...' has is_synthetic=true in production bundle`:**
   - **Cause:** A development or test fixture record was accidentally included in a production bundle.
   - **Resolution:** Re-export the bundle with `is_synthetic: false` on all production advisory entries.
+
+### 12.7 Trust Store Security, Permissions, and Symlinks (Phase 2.8)
+- **Symlinks Forbidden:** `rules/trusted_keys.json` must be a real regular file. Symbolic links are strictly rejected (`KeyStoreError::SymlinkForbidden`) to prevent symlink redirect attacks.
+- **Insecure Permissions:** On Unix systems, the trust store must not be world-writable (`mode & 0o002 == 0`). If permissions are insecure, loading fails with `KeyStoreError::InsecurePermissions`.
+- **Explicit Corruption Status:** If `rules/trusted_keys.json` is corrupted or malformed, the engine marks the trust store as corrupted and fails closed on all signature verifications. It never silently falls back to embedded keys when the on-disk file is damaged.
+
+### 12.8 Troubleshooting Adversarial Trust & Hardening Errors
+- **Error: `Duplicate JSON key detected: '...'`:**
+  - **Cause:** The candidate bundle or trust store contains duplicate keys in a JSON object.
+  - **Resolution:** Regenerate the bundle or trust store using standard canonical JSON tools without duplicate keys.
+- **Error: `Trust store path '...' is a symbolic link`:**
+  - **Cause:** `rules/trusted_keys.json` is a symlink.
+  - **Resolution:** Replace the symlink with a regular file containing genuine trusted public keys (`chmod 644 rules/trusted_keys.json`).
+- **Error: `Trust store path '...' is world-writable`:**
+  - **Cause:** File permissions allow arbitrary local write access.
+  - **Resolution:** Restrict permissions: `chmod 644 rules/trusted_keys.json`.
+- **Error: `Rollback override rejected: unauthenticated or unconfirmed rollback attempt over IPC` (Code `-32008`):**
+  - **Cause:** An IPC client specified `allow_rollback: true` without supplying the mandatory `rollback_confirmation_token: "CONFIRM_ADVISORY_ROLLBACK"`.
+  - **Resolution:** Pass `--allow-rollback` via CLI, or ensure the IPC request explicitly includes `rollback_confirmation_token: "CONFIRM_ADVISORY_ROLLBACK"`.
 
 
 

@@ -516,7 +516,7 @@ pub struct GateDispatchAuthorizedResult {
     pub message: String,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[serde(rename_all = "SCREAMING_SNAKE_CASE")]
 pub enum PackageEcosystem {
     Npm,
@@ -524,6 +524,20 @@ pub enum PackageEcosystem {
     Yarn,
     Pip,
     Cargo,
+}
+
+impl std::str::FromStr for PackageEcosystem {
+    type Err = String;
+    fn from_str(s: &str) -> Result<Self, Self::Err> {
+        match s.trim().to_uppercase().as_str() {
+            "NPM" => Ok(Self::Npm),
+            "PNPM" => Ok(Self::Pnpm),
+            "YARN" => Ok(Self::Yarn),
+            "PIP" => Ok(Self::Pip),
+            "CARGO" => Ok(Self::Cargo),
+            other => Err(format!("Unknown ecosystem: '{}'", other)),
+        }
+    }
 }
 
 impl PackageEcosystem {
@@ -903,6 +917,8 @@ pub struct PackageImportAdvisoryBundleParams {
     pub keys_path: Option<String>,
     #[serde(default)]
     pub allow_rollback: bool,
+    #[serde(default)]
+    pub rollback_confirmation_token: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

@@ -34,6 +34,8 @@ pub enum BundleValidationError {
     IncompatibleEngineVersion { required: String, current: String },
     PayloadDigestMismatch { expected: String, computed: String },
     SignatureError(String),
+    PublisherMismatch { expected: String, claimed: String },
+    MalformedVersion(String),
     RollbackRejected { candidate: String, active: String },
     EmptyAdvisories,
     MalformedRecord(String),
@@ -45,15 +47,43 @@ pub enum BundleValidationError {
 impl std::fmt::Display for BundleValidationError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
-            Self::UnsupportedFormatVersion(v) => write!(f, "Unsupported bundle format version '{}' (expected '{}')", v, SUPPORTED_BUNDLE_FORMAT),
-            Self::IncompatibleEngineVersion { required, current } => write!(f, "Bundle requires engine version >= {} (current engine is {})", required, current),
-            Self::PayloadDigestMismatch { expected, computed } => write!(f, "Advisory payload digest mismatch: bundle claims {} but computed {}", expected, computed),
+            Self::UnsupportedFormatVersion(v) => write!(
+                f,
+                "Unsupported bundle format version '{}' (expected '{}')",
+                v, SUPPORTED_BUNDLE_FORMAT
+            ),
+            Self::IncompatibleEngineVersion { required, current } => write!(
+                f,
+                "Bundle requires engine version >= {} (current engine is {})",
+                required, current
+            ),
+            Self::PayloadDigestMismatch { expected, computed } => write!(
+                f,
+                "Advisory payload digest mismatch: bundle claims {} but computed {}",
+                expected, computed
+            ),
             Self::SignatureError(msg) => write!(f, "Signature validation error: {}", msg),
-            Self::RollbackRejected { candidate, active } => write!(f, "Rollback rejected: candidate database version {} is not strictly newer than active version {} (specify --allow-rollback to override)", candidate, active),
+            Self::PublisherMismatch { expected, claimed } => write!(
+                f,
+                "Publisher identity mismatch: key belongs to '{}' but bundle claims '{}'",
+                expected, claimed
+            ),
+            Self::MalformedVersion(msg) => write!(f, "Malformed database version string: {}", msg),
+            Self::RollbackRejected { candidate, active } => write!(
+                f,
+                "Rollback rejected: candidate database version {} is not strictly newer than active version {} (specify --allow-rollback to override)",
+                candidate, active
+            ),
             Self::EmptyAdvisories => write!(f, "Advisory bundle contains zero advisory records"),
             Self::MalformedRecord(msg) => write!(f, "Malformed advisory record: {}", msg),
-            Self::SyntheticContamination(id) => write!(f, "Synthetic test fixture contamination detected: record '{}' has is_synthetic=true in production bundle", id),
-            Self::DuplicateAdvisoryId(id) => write!(f, "Duplicate advisory identifier detected in bundle: '{}'", id),
+            Self::SyntheticContamination(id) => write!(
+                f,
+                "Synthetic test fixture contamination detected: record '{}' has is_synthetic=true in production bundle",
+                id
+            ),
+            Self::DuplicateAdvisoryId(id) => {
+                write!(f, "Duplicate advisory identifier detected in bundle: '{}'", id)
+            }
             Self::ConflictingAdvisoryRecord(msg) => write!(f, "Conflicting advisory record: {}", msg),
         }
     }
@@ -63,7 +93,15 @@ impl std::error::Error for BundleValidationError {}
 
 impl From<KeyVerificationError> for BundleValidationError {
     fn from(e: KeyVerificationError) -> Self {
-        Self::SignatureError(e.to_string())
+        match e {
+            KeyVerificationError::PublisherMismatch { expected, actual } => {
+                Self::PublisherMismatch {
+                    expected,
+                    claimed: actual,
+                }
+            }
+            other => Self::SignatureError(other.to_string()),
+        }
     }
 }
 
@@ -120,21 +158,45 @@ pub fn compute_canonical_payload_digest(advisories: &[AdvisoryRecord]) -> String
     format!("{:x}", hasher.finalize())
 }
 
-pub fn parse_version_tuple(v: &str) -> Vec<u64> {
+pub fn parse_strict_version(v: &str) -> Result<Vec<u64>, BundleValidationError> {
     let cleaned = v.trim().trim_start_matches('v');
-    cleaned
-        .split('.')
-        .map(|seg| {
-            // Take digits before any pre-release hyphen or plus
-            let digits: String = seg.chars().take_while(|c| c.is_ascii_digit()).collect();
-            digits.parse::<u64>().unwrap_or(0)
-        })
-        .collect()
+    if cleaned.is_empty() {
+        return Err(BundleValidationError::MalformedVersion(
+            "Version string cannot be empty".to_string(),
+        ));
+    }
+    let parts: Vec<&str> = cleaned.split('.').collect();
+    if parts.is_empty() || parts.len() > 4 {
+        return Err(BundleValidationError::MalformedVersion(format!(
+            "Invalid version format '{}': expected 1 to 4 numeric segments",
+            v
+        )));
+    }
+    let mut parsed = Vec::new();
+    for seg in parts {
+        if seg.is_empty() || !seg.chars().all(|c| c.is_ascii_digit()) {
+            return Err(BundleValidationError::MalformedVersion(format!(
+                "Invalid version segment '{}' in version '{}': must contain only ASCII digits",
+                seg, v
+            )));
+        }
+        let n = seg.parse::<u64>().map_err(|e| {
+            BundleValidationError::MalformedVersion(format!(
+                "Failed to parse numeric segment '{}' in version '{}': {}",
+                seg, v, e
+            ))
+        })?;
+        parsed.push(n);
+    }
+    Ok(parsed)
 }
 
-pub fn compare_db_versions(candidate: &str, active: &str) -> Ordering {
-    let c_parts = parse_version_tuple(candidate);
-    let a_parts = parse_version_tuple(active);
+pub fn compare_db_versions(
+    candidate: &str,
+    active: &str,
+) -> Result<Ordering, BundleValidationError> {
+    let c_parts = parse_strict_version(candidate)?;
+    let a_parts = parse_strict_version(active)?;
 
     let max_len = std::cmp::max(c_parts.len(), a_parts.len());
     for i in 0..max_len {
@@ -142,15 +204,21 @@ pub fn compare_db_versions(candidate: &str, active: &str) -> Ordering {
         let a_val = *a_parts.get(i).unwrap_or(&0);
         match c_val.cmp(&a_val) {
             Ordering::Equal => continue,
-            other => return other,
+            other => return Ok(other),
         }
     }
-    Ordering::Equal
+    Ok(Ordering::Equal)
 }
 
 pub fn is_engine_compatible(min_cyravell: &str, current_engine: &str) -> bool {
-    let min_parts = parse_version_tuple(min_cyravell);
-    let cur_parts = parse_version_tuple(current_engine);
+    let min_parts = match parse_strict_version(min_cyravell) {
+        Ok(p) => p,
+        Err(_) => return false,
+    };
+    let cur_parts = match parse_strict_version(current_engine) {
+        Ok(p) => p,
+        Err(_) => return false,
+    };
 
     let max_len = std::cmp::max(min_parts.len(), cur_parts.len());
     for i in 0..max_len {
@@ -167,14 +235,23 @@ pub fn is_engine_compatible(min_cyravell: &str, current_engine: &str) -> bool {
 
 impl AdvisoryBundle {
     pub fn canonical_signing_bytes(&self) -> Vec<u8> {
+        let mut sorted_ecosystems = self.supported_ecosystems.clone();
+        sorted_ecosystems.sort_by(|a, b| a.as_str().cmp(b.as_str()));
+        let ecosystems_str = sorted_ecosystems
+            .iter()
+            .map(|e| e.as_str())
+            .collect::<Vec<_>>()
+            .join(",");
+
         let msg = format!(
-            "CYRAVELL-ADVISORY-BUNDLE-V1\nformat_version:{}\ndatabase_version:{}\ncreated_at:{}\npublisher:{}\nkey_id:{}\nmin_cyravell_version:{}\npayload_digest:{}\n",
+            "CYRAVELL-ADVISORY-BUNDLE-V1\nformat_version:{}\ndatabase_version:{}\ncreated_at:{}\npublisher:{}\nkey_id:{}\nmin_cyravell_version:{}\nsupported_ecosystems:{}\npayload_digest:{}\n",
             self.bundle_format_version.trim(),
             self.database_version.trim(),
             self.created_at.to_rfc3339(),
             self.publisher.trim(),
             self.key_id.trim(),
             self.min_cyravell_version.as_deref().unwrap_or("").trim(),
+            ecosystems_str,
             self.payload_digest.trim()
         );
         msg.into_bytes()
@@ -193,7 +270,10 @@ impl AdvisoryBundle {
             ));
         }
 
-        // 2. Engine compatibility
+        // 2. Strict candidate database version validation
+        parse_strict_version(&self.database_version)?;
+
+        // 3. Engine compatibility
         if let Some(ref min_ver) = self.min_cyravell_version {
             if !is_engine_compatible(min_ver, CYRAVELL_ENGINE_VERSION) {
                 return Err(BundleValidationError::IncompatibleEngineVersion {
@@ -203,7 +283,7 @@ impl AdvisoryBundle {
             }
         }
 
-        // 3. Payload digest verification
+        // 4. Payload digest verification
         let computed_digest = compute_canonical_payload_digest(&self.advisories);
         if computed_digest != self.payload_digest.trim().to_lowercase() {
             return Err(BundleValidationError::PayloadDigestMismatch {
@@ -212,15 +292,26 @@ impl AdvisoryBundle {
             });
         }
 
-        // 4. Cryptographic signature verification
+        // 5. Publisher identity and cryptographic signature verification
+        let key = key_store
+            .get_key(&self.key_id)
+            .ok_or_else(|| KeyVerificationError::KeyNotFound(self.key_id.clone()))?;
+
+        if key.publisher.trim() != self.publisher.trim() {
+            return Err(BundleValidationError::PublisherMismatch {
+                expected: key.publisher.clone(),
+                claimed: self.publisher.clone(),
+            });
+        }
+
         let signing_msg = self.canonical_signing_bytes();
         key_store
             .verify_signature(&self.key_id, &signing_msg, &self.signature)
             .map_err(BundleValidationError::from)?;
 
-        // 5. Anti-rollback enforcement
+        // 6. Anti-rollback enforcement
         if let Some(active) = active_db_version {
-            let ord = compare_db_versions(&self.database_version, active);
+            let ord = compare_db_versions(&self.database_version, active)?;
             if ord != Ordering::Greater && !allow_rollback {
                 return Err(BundleValidationError::RollbackRejected {
                     candidate: self.database_version.clone(),
@@ -229,7 +320,7 @@ impl AdvisoryBundle {
             }
         }
 
-        // 6. Content validation
+        // 7. Content validation
         if self.advisories.is_empty() {
             return Err(BundleValidationError::EmptyAdvisories);
         }

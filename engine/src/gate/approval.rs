@@ -2,11 +2,13 @@
 // SPDX-License-Identifier: Apache-2.0
 
 use chrono::{DateTime, Duration, Utc};
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::sync::Mutex;
 use uuid::Uuid;
 
-use crate::model::{ApprovalRequest, ApprovalStatus, ApprovalUserDecision, Severity};
+use crate::model::{
+    ApprovalRequest, ApprovalStatus, ApprovalUserDecision, PackageEcosystem, Severity,
+};
 
 #[derive(Debug, PartialEq, Eq)]
 pub enum ApprovalError {
@@ -329,6 +331,62 @@ impl ApprovalManager {
         }
 
         pending
+    }
+
+    /// Invalidates pending and approved requests targeting newly confirmed malicious packages.
+    /// Crucially destroys unconsumed single-use authorization tokens so approval cannot be replayed.
+    pub fn invalidate_for_malicious_packages(
+        &self,
+        malicious_pkgs: &HashSet<(PackageEcosystem, String)>,
+    ) -> Vec<String> {
+        let mut lock = self.requests.lock().unwrap();
+        let mut invalidated = Vec::new();
+
+        for stored in lock.values_mut() {
+            // Only Pending or Approved (unconsumed) requests can be invalidated
+            if stored.request.status != ApprovalStatus::Pending
+                && stored.request.status != ApprovalStatus::Approved
+            {
+                continue;
+            }
+
+            let mut matches_malicious = false;
+
+            // Check if package details explicitly contain a malicious package
+            if let Some(ref details) = stored.request.package_details {
+                for finding in &details.findings {
+                    if malicious_pkgs
+                        .contains(&(details.package_manager, finding.package_name.to_lowercase()))
+                    {
+                        matches_malicious = true;
+                        break;
+                    }
+                }
+            }
+
+            // Also check command text for package names
+            if !matches_malicious {
+                for (_, mal_name) in malicious_pkgs {
+                    if stored.request.command.to_lowercase().contains(mal_name) {
+                        matches_malicious = true;
+                        break;
+                    }
+                }
+            }
+
+            if matches_malicious {
+                stored.request.status = ApprovalStatus::Denied;
+                stored.request.decision_reason = Some(
+                    "Invalidated: package identified as confirmed malicious by newly activated advisory intelligence"
+                        .to_string(),
+                );
+                // DESTROY TOKEN IMMEDIATELY TO PREVENT REPLAY
+                stored.authorization_token = None;
+                invalidated.push(stored.request.request_id.clone());
+            }
+        }
+
+        invalidated
     }
 }
 

@@ -629,7 +629,8 @@ export class EngineClient extends EventEmitter {
   public async importAdvisoryBundle(
     bundlePath: string,
     allowRollback: boolean = false,
-    keysPath?: string
+    keysPath?: string,
+    rollbackConfirmationToken?: string
   ): Promise<BundleImportResult> {
     if (this.state !== 'CONNECTED') {
       throw new Error('Engine is not connected');
@@ -638,6 +639,8 @@ export class EngineClient extends EventEmitter {
       bundle_path: bundlePath,
       allow_rollback: allowRollback,
       keys_path: keysPath,
+      rollback_confirmation_token:
+        rollbackConfirmationToken || (allowRollback ? 'CONFIRM_ADVISORY_ROLLBACK' : undefined),
     });
   }
 

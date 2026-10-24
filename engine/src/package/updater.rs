@@ -2,21 +2,24 @@
 // SPDX-License-Identifier: Apache-2.0
 
 use crate::audit::AuditLog;
+use crate::gate::approval::ApprovalManager;
 use crate::model::{
     BundleImportResult, BundleInspectionResult, DriftChangeType, DriftFinding, DriftReport,
-    FindingConfidence, Severity,
+    FindingConfidence, PackageEcosystem, Severity,
 };
 use crate::package::advisory::{AdvisoryDatabase, AdvisoryRecord};
 use crate::package::assessor::PackageSecurityAssessor;
 use crate::package::baseline::BaselineStore;
 use crate::package::bundle::{compare_db_versions, AdvisoryBundle, BundleValidationError};
+use crate::package::state::AdvisorySecurityState;
+use crate::package::strict_json::validate_no_duplicate_keys;
 use crate::package::trust::TrustedKeyStore;
 use chrono::Utc;
 use std::cmp::Ordering;
 use std::collections::HashSet;
 use std::io::Write;
 use std::path::{Path, PathBuf};
-use std::sync::Arc;
+use std::sync::{Arc, RwLock};
 
 #[derive(Debug)]
 pub enum UpdateError {
@@ -65,6 +68,8 @@ pub struct AdvisoryUpdater {
     audit_logger: Arc<AuditLog>,
     trusted_keys: Arc<TrustedKeyStore>,
     storage_path: PathBuf,
+    security_state: Arc<RwLock<AdvisorySecurityState>>,
+    approval_manager: Option<Arc<ApprovalManager>>,
 }
 
 impl AdvisoryUpdater {
@@ -75,13 +80,34 @@ impl AdvisoryUpdater {
         trusted_keys: Arc<TrustedKeyStore>,
         storage_path: PathBuf,
     ) -> Self {
+        let active_ver = assessor.advisory_db().database_version().to_string();
+        let state_path = storage_path.with_file_name("advisory_security_state.json");
+        let initial_state = AdvisorySecurityState::load_from_path(&state_path, &active_ver)
+            .unwrap_or_else(|_| AdvisorySecurityState::new(&active_ver));
+
+        // Sync persistent tombstones into in-memory assessor
+        for tomb in &initial_state.malicious_tombstones {
+            if let Some((eco_str, pkg_name)) = tomb.split_once(':') {
+                if let Ok(eco) = eco_str.parse::<PackageEcosystem>() {
+                    assessor.record_malicious_tombstone(eco, pkg_name);
+                }
+            }
+        }
+
         Self {
             assessor,
             baseline_store,
             audit_logger,
             trusted_keys,
             storage_path,
+            security_state: Arc::new(RwLock::new(initial_state)),
+            approval_manager: None,
         }
+    }
+
+    pub fn with_approval_manager(mut self, manager: Arc<ApprovalManager>) -> Self {
+        self.approval_manager = Some(manager);
+        self
     }
 
     pub fn assessor(&self) -> &Arc<PackageSecurityAssessor> {
@@ -96,6 +122,10 @@ impl AdvisoryUpdater {
         &self.storage_path
     }
 
+    pub fn security_state(&self) -> &Arc<RwLock<AdvisorySecurityState>> {
+        &self.security_state
+    }
+
     /// Inspects an advisory bundle without activating it.
     /// Performs cryptographic signature verification, format checks, and computes diff.
     pub fn inspect_bundle(
@@ -103,22 +133,41 @@ impl AdvisoryUpdater {
         bundle_path: &Path,
     ) -> Result<BundleInspectionResult, UpdateError> {
         let content = std::fs::read_to_string(bundle_path)?;
+        validate_no_duplicate_keys(&content)
+            .map_err(|e| UpdateError::Validation(BundleValidationError::MalformedRecord(e)))?;
         let bundle: AdvisoryBundle = serde_json::from_str(&content)?;
 
         let active_db = self.assessor.advisory_db();
-        let active_ver = active_db.database_version();
+        let active_ver = active_db.database_version().to_string();
+        let high_water = self
+            .security_state
+            .read()
+            .unwrap()
+            .high_water_version
+            .clone();
 
-        let ord = compare_db_versions(&bundle.database_version, active_ver);
+        let effective_active = if compare_db_versions(&active_ver, &high_water)
+            .unwrap_or(Ordering::Equal)
+            == Ordering::Greater
+        {
+            active_ver.clone()
+        } else {
+            high_water.clone()
+        };
+
+        let ord = compare_db_versions(&bundle.database_version, &effective_active)
+            .unwrap_or(Ordering::Less);
         let would_rollback = ord != Ordering::Greater;
 
         // Perform validation check without throwing early on rollback (inspection should report it)
         let validation_res =
-            bundle.validate_and_authenticate(&self.trusted_keys, Some(active_ver), true);
+            bundle.validate_and_authenticate(&self.trusted_keys, Some(&effective_active), true);
         let is_valid = validation_res.is_ok();
         let signature_valid = !matches!(
             validation_res,
             Err(BundleValidationError::SignatureError(_))
                 | Err(BundleValidationError::PayloadDigestMismatch { .. })
+                | Err(BundleValidationError::PublisherMismatch { .. })
         );
 
         // Compute diff against active database records
@@ -174,6 +223,17 @@ impl AdvisoryUpdater {
             would_rollback
         );
 
+        // Record inspection in audit trail
+        let _ = self.audit_logger.append(
+            &format!("adv-insp-{}", uuid::Uuid::new_v4()),
+            "PACKAGE_ADVISORY_INSPECTED",
+            &format!(
+                "Inspected advisory bundle v{} from publisher '{}' (records: {}, valid: {}, would_rollback: {})",
+                bundle.database_version, bundle.publisher, bundle.advisories.len(), is_valid, would_rollback
+            ),
+            Severity::Info,
+        );
+
         Ok(BundleInspectionResult {
             bundle_format_version: bundle.bundle_format_version,
             database_version: bundle.database_version.clone(),
@@ -183,7 +243,7 @@ impl AdvisoryUpdater {
             is_valid,
             signature_valid,
             candidate_version: bundle.database_version,
-            active_version: active_ver.to_string(),
+            active_version: active_ver,
             would_rollback,
             records_count: bundle.advisories.len(),
             malicious_count,
@@ -198,21 +258,38 @@ impl AdvisoryUpdater {
     /// Atomically validates, verifies, and activates an advisory bundle.
     /// On failure: the previous active database remains 100% usable and unaffected.
     /// On success: activates the database, writes atomic persistence, updates audit chain,
-    /// and reassesses affected dependency baselines.
+    /// invalidates pending approvals, and reassesses affected dependency baselines.
     pub fn import_bundle(
         &self,
         bundle_path: &Path,
         allow_rollback: bool,
     ) -> Result<BundleImportResult, UpdateError> {
         let content = std::fs::read_to_string(bundle_path)?;
+        validate_no_duplicate_keys(&content)
+            .map_err(|e| UpdateError::Validation(BundleValidationError::MalformedRecord(e)))?;
         let bundle: AdvisoryBundle = serde_json::from_str(&content)?;
 
         let previous_version = self.assessor.advisory_db().database_version().to_string();
+        let high_water = self
+            .security_state
+            .read()
+            .unwrap()
+            .high_water_version
+            .clone();
 
-        // 1. Authenticate and validate candidate bundle
+        let effective_active = if compare_db_versions(&previous_version, &high_water)
+            .unwrap_or(Ordering::Equal)
+            == Ordering::Greater
+        {
+            previous_version.clone()
+        } else {
+            high_water.clone()
+        };
+
+        // 1. Authenticate and validate candidate bundle against monotonic high-water mark
         if let Err(err) = bundle.validate_and_authenticate(
             &self.trusted_keys,
-            Some(&previous_version),
+            Some(&effective_active),
             allow_rollback,
         ) {
             // Log rejection to tamper-evident audit trail
@@ -228,13 +305,28 @@ impl AdvisoryUpdater {
             return Err(UpdateError::Validation(err));
         }
 
-        // 2. Safe transaction: atomic write to persistence file
-        if let Some(parent) = self.storage_path.parent() {
-            let _ = std::fs::create_dir_all(parent);
+        if allow_rollback {
+            let _ = self.audit_logger.append(
+                &format!("adv-rb-auth-{}", uuid::Uuid::new_v4()),
+                "PACKAGE_ADVISORY_ROLLBACK_AUTHORIZED",
+                &format!(
+                    "Advisory database rollback authorized: candidate v{} replaces effective v{}",
+                    bundle.database_version, effective_active
+                ),
+                Severity::High,
+            );
         }
-        let tmp_path = self
-            .storage_path
-            .with_extension(format!("tmp.{}", uuid::Uuid::new_v4()));
+
+        // 2. Safe transaction: atomic write to persistence file with isolated temporary storage
+        let parent = self.storage_path.parent().unwrap_or_else(|| Path::new("."));
+        let _ = std::fs::create_dir_all(parent);
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            let _ = std::fs::set_permissions(parent, std::fs::Permissions::from_mode(0o700));
+        }
+
+        let tmp_path = parent.join(format!(".tmp_adv_{}", uuid::Uuid::new_v4()));
         let persisted = crate::package::advisory::PersistedAdvisoryDb {
             database_version: bundle.database_version.clone(),
             format_version: bundle.bundle_format_version.clone(),
@@ -243,12 +335,28 @@ impl AdvisoryUpdater {
             last_updated: Some(bundle.created_at),
             advisories: bundle.advisories.clone(),
         };
+
         let write_res = (|| -> Result<(), std::io::Error> {
-            let mut file = std::fs::File::create(&tmp_path)?;
+            let mut file = std::fs::OpenOptions::new()
+                .write(true)
+                .create_new(true)
+                .open(&tmp_path)?;
+            #[cfg(unix)]
+            {
+                use std::os::unix::fs::PermissionsExt;
+                let _ = file.set_permissions(std::fs::Permissions::from_mode(0o600));
+            }
             let json = serde_json::to_string_pretty(&persisted)?;
             file.write_all(json.as_bytes())?;
             file.sync_all()?;
+            drop(file);
             std::fs::rename(&tmp_path, &self.storage_path)?;
+            #[cfg(unix)]
+            {
+                if let Ok(dir_file) = std::fs::File::open(parent) {
+                    let _ = dir_file.sync_all();
+                }
+            }
             Ok(())
         })();
 
@@ -279,7 +387,47 @@ impl AdvisoryUpdater {
 
         self.assessor.update_advisory_db(new_db);
 
-        // 4. Reassessment of monitored workspace dependency baselines
+        // 4. Update durable security state (high-water mark and irreversible malicious tombstones)
+        {
+            let mut state = self.security_state.write().unwrap();
+            state.record_version(&bundle.database_version);
+            for adv in &bundle.advisories {
+                if adv.is_malicious {
+                    state.record_malicious_package(adv.ecosystem, &adv.package_name);
+                    self.assessor
+                        .record_malicious_tombstone(adv.ecosystem, &adv.package_name);
+                }
+            }
+            let state_path = self
+                .storage_path
+                .with_file_name("advisory_security_state.json");
+            let _ = state.save_to_path(&state_path);
+        }
+
+        // 5. Invalidate pending or approved requests targeting newly confirmed malicious packages
+        let mut malicious_pkgs = HashSet::new();
+        for adv in &bundle.advisories {
+            if adv.is_malicious {
+                malicious_pkgs.insert((adv.ecosystem, adv.package_name.to_lowercase()));
+            }
+        }
+
+        if let Some(ref mgr) = self.approval_manager {
+            let invalidated = mgr.invalidate_for_malicious_packages(&malicious_pkgs);
+            for req_id in invalidated {
+                let _ = self.audit_logger.append(
+                    &format!("inv-appr-{}", uuid::Uuid::new_v4()),
+                    "PACKAGE_APPROVAL_INVALIDATED",
+                    &format!(
+                        "Pending approval request '{}' invalidated and hard-blocked: package identified as malicious by newly activated advisory intelligence",
+                        req_id
+                    ),
+                    Severity::Critical,
+                );
+            }
+        }
+
+        // 6. Reassessment of monitored workspace dependency baselines
         let mut affected_workspaces = Vec::new();
         let newly_malicious: Vec<&AdvisoryRecord> = bundle
             .advisories
@@ -364,7 +512,7 @@ impl AdvisoryUpdater {
             }
         }
 
-        // 5. Record successful activation in audit trail
+        // 7. Record successful activation in audit trail
         let audit_record = self.audit_logger.append(
             &format!("adv-update-{}", uuid::Uuid::new_v4()),
             "PACKAGE_ADVISORY_UPDATE_ACTIVATED",
@@ -381,6 +529,16 @@ impl AdvisoryUpdater {
             Severity::Info,
         );
         let audit_seq = audit_record.map(|r| r.sequence_number).unwrap_or(0);
+
+        let _ = self.audit_logger.append(
+            &format!("adv-reassess-{}", uuid::Uuid::new_v4()),
+            "PACKAGE_ADVISORY_REASSESSMENT_COMPLETED",
+            &format!(
+                "Reassessment completed after update v{}: {} workspace(s) affected by newly activated findings",
+                bundle.database_version, affected_workspaces.len()
+            ),
+            Severity::Info,
+        );
 
         let message = format!(
             "Successfully imported and activated advisory database v{} ({} records, {} confirmed malicious). Previous version: v{}.",

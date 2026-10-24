@@ -896,8 +896,8 @@ Inspects a local advisory bundle file without applying it. Performs Ed25519 cryp
 
 ---
 
-### 3.20 `package.import_advisory_bundle` (Phase 2.7)
-Authenticates, validates, atomically persists, and activates an advisory update bundle. Atomically swaps the active in-memory database, records a tamper-evident audit record, and automatically re-evaluates dependency baselines across all monitored workspaces. Enforces anti-rollback unless `allow_rollback: true` is explicitly authorized.
+### 3.20 `package.import_advisory_bundle` (Phase 2.7 / Phase 2.8)
+Authenticates, validates, atomically persists, and activates an advisory update bundle. Atomically swaps the active in-memory database, records a tamper-evident audit record, invalidates pending approvals for newly flagged malicious packages, and automatically re-evaluates dependency baselines across all monitored workspaces. Enforces anti-rollback against the persistent monotonic high-water mark unless `allow_rollback: true` and an explicit `rollback_confirmation_token` are supplied.
 
 **Request:**
 ```json
@@ -908,10 +908,13 @@ Authenticates, validates, atomically persists, and activates an advisory update 
   "params": {
     "bundle_path": "/tmp/advisory-bundle-2026.05.01.json",
     "allow_rollback": false,
+    "rollback_confirmation_token": null,
     "keys_path": null
   }
 }
 ```
+
+*Note on Privileged Rollback:* If `allow_rollback` is `true`, `rollback_confirmation_token` must be `"CONFIRM_ADVISORY_ROLLBACK"`. Unauthenticated or unconfirmed rollback requests over IPC are rejected with error code `-32008`.
 
 **Response:**
 ```json
@@ -934,5 +937,10 @@ Authenticates, validates, atomically persists, and activates an advisory update 
   }
 }
 ```
+
+**Common Error Codes:**
+- `-32602`: Missing or invalid params format.
+- `-32007`: Bundle verification, signature, digest, duplicate key, or schema validation failed.
+- `-32008`: Rollback override rejected: unauthenticated or unconfirmed rollback attempt over IPC (requires `"CONFIRM_ADVISORY_ROLLBACK"`).
 
 

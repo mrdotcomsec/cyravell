@@ -80,13 +80,16 @@ impl IpcServer {
         let baseline_store = Arc::new(BaselineStore::default());
         let trusted_keys = Arc::new(TrustedKeyStore::load_default());
         let advisory_store_path = data_dir.join("advisories.json");
-        let advisory_updater = Arc::new(AdvisoryUpdater::new(
-            Arc::clone(&package_assessor),
-            Arc::clone(&baseline_store),
-            Arc::clone(&audit),
-            Arc::clone(&trusted_keys),
-            advisory_store_path,
-        ));
+        let advisory_updater = Arc::new(
+            AdvisoryUpdater::new(
+                Arc::clone(&package_assessor),
+                Arc::clone(&baseline_store),
+                Arc::clone(&audit),
+                Arc::clone(&trusted_keys),
+                advisory_store_path,
+            )
+            .with_approval_manager(Arc::clone(&approval_manager)),
+        );
 
         let state = Arc::new(EngineState {
             start_time: Instant::now(),
@@ -2000,6 +2003,27 @@ fn dispatch_request(req: JsonRpcRequest, state: &Arc<EngineState>) -> JsonRpcRes
                     )
                 }
             };
+
+            // Rollback override protection against unauthenticated IPC callers
+            if p.allow_rollback
+                && p.rollback_confirmation_token.as_deref() != Some("CONFIRM_ADVISORY_ROLLBACK")
+            {
+                let _ = state.audit.append(
+                    &format!("adv-rb-unauth-{}", uuid::Uuid::new_v4()),
+                    "PACKAGE_ADVISORY_ROLLBACK_ATTEMPTED",
+                    &format!(
+                        "Unauthenticated rollback override attempted over IPC for bundle '{}'",
+                        p.bundle_path
+                    ),
+                    Severity::High,
+                );
+                return JsonRpcResponse::error(
+                    id,
+                    -32008,
+                    "Rollback override rejected: unauthenticated or unconfirmed rollback attempt over IPC. Explicit confirmation token is required.".to_string(),
+                    None,
+                );
+            }
 
             let path = Path::new(&p.bundle_path);
             match state.advisory_updater.import_bundle(path, p.allow_rollback) {

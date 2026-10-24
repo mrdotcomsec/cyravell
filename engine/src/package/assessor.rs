@@ -9,6 +9,7 @@ use crate::model::{
 use crate::package::advisory::AdvisoryDatabase;
 use crate::package::detector::{detect_package_command, DetectedPackageCommand};
 use crate::package::manifest::ManifestInspector;
+use std::collections::HashSet;
 use std::path::Path;
 use std::sync::{Arc, RwLock, RwLockReadGuard};
 
@@ -36,6 +37,7 @@ impl Default for PackageSecurityConfig {
 pub struct PackageSecurityAssessor {
     config: PackageSecurityConfig,
     advisory_db: Arc<RwLock<AdvisoryDatabase>>,
+    tombstones: Arc<RwLock<HashSet<String>>>,
 }
 
 impl Default for PackageSecurityAssessor {
@@ -47,15 +49,43 @@ impl Default for PackageSecurityAssessor {
 impl PackageSecurityAssessor {
     pub fn new(config: PackageSecurityConfig) -> Self {
         let advisory_db = AdvisoryDatabase::load_with_fallback(config.advisory_path.as_deref());
+        let mut tombstones = HashSet::new();
+
+        // Load durable tombstones from persistent advisory_security_state.json if present
+        if let Some(ref adv_path) = config.advisory_path {
+            let state_path = adv_path.with_file_name("advisory_security_state.json");
+            if state_path.exists() {
+                if let Ok(state) = crate::package::state::AdvisorySecurityState::load_from_path(
+                    &state_path,
+                    advisory_db.database_version(),
+                ) {
+                    tombstones = state.malicious_tombstones;
+                }
+            }
+        }
+
         Self {
             config,
             advisory_db: Arc::new(RwLock::new(advisory_db)),
+            tombstones: Arc::new(RwLock::new(tombstones)),
         }
     }
 
     pub fn with_advisories(self, db: AdvisoryDatabase) -> Self {
         *self.advisory_db.write().expect("advisory_db lock poisoned") = db;
         self
+    }
+
+    pub fn record_malicious_tombstone(&self, eco: PackageEcosystem, name: &str) {
+        let key = format!("{}:{}", eco.as_str(), name.to_lowercase());
+        let mut lock = self.tombstones.write().expect("tombstones lock poisoned");
+        lock.insert(key);
+    }
+
+    pub fn is_tombstoned_malicious(&self, eco: PackageEcosystem, name: &str) -> bool {
+        let key = format!("{}:{}", eco.as_str(), name.to_lowercase());
+        let lock = self.tombstones.read().expect("tombstones lock poisoned");
+        lock.contains(&key)
     }
 
     pub fn advisory_db(&self) -> RwLockReadGuard<'_, AdvisoryDatabase> {
@@ -72,6 +102,9 @@ impl PackageSecurityAssessor {
     }
 
     pub fn is_malicious_package(&self, eco: PackageEcosystem, name: &str) -> bool {
+        if self.is_tombstoned_malicious(eco, name) {
+            return true;
+        }
         self.advisory_db().is_malicious_package(eco, name)
     }
 
@@ -228,6 +261,27 @@ impl PackageSecurityAssessor {
                     details: adv.details.clone(),
                 });
             }
+
+            if self.is_tombstoned_malicious(detected.package_manager, &pkg.name)
+                && !findings
+                    .iter()
+                    .any(|f| f.package_name == pkg.name && f.is_malicious)
+            {
+                findings.push(PackageSecurityFinding {
+                    package_name: pkg.name.clone(),
+                    version: pkg.version_constraint.clone(),
+                    advisory_id: format!("CYR-MALICIOUS-TOMBSTONE-{}", pkg.name),
+                    title: format!(
+                        "Persistent Security Invariant: Confirmed Malicious Package '{}'",
+                        pkg.name
+                    ),
+                    severity: Severity::Critical,
+                    is_malicious: true,
+                    affected_range: ">= 0.0.0".to_string(),
+                    fixed_version: None,
+                    details: "This package has been permanently classified as malicious in Cyravell's persistent security state and cannot be cleared by database rollback or missing files.".to_string(),
+                });
+            }
         }
 
         // 3. Scan resolved lockfile dependencies if present
@@ -253,6 +307,27 @@ impl PackageSecurityAssessor {
                         details: adv.details.clone(),
                     });
                 }
+            }
+
+            if self.is_tombstoned_malicious(detected.package_manager, &dep.name)
+                && !findings
+                    .iter()
+                    .any(|f| f.package_name == dep.name && f.is_malicious)
+            {
+                findings.push(PackageSecurityFinding {
+                    package_name: dep.name.clone(),
+                    version: Some(dep.version.clone()),
+                    advisory_id: format!("CYR-MALICIOUS-TOMBSTONE-{}", dep.name),
+                    title: format!(
+                        "Persistent Security Invariant: Confirmed Malicious Package '{}'",
+                        dep.name
+                    ),
+                    severity: Severity::Critical,
+                    is_malicious: true,
+                    affected_range: ">= 0.0.0".to_string(),
+                    fixed_version: None,
+                    details: "This package has been permanently classified as malicious in Cyravell's persistent security state and cannot be cleared by database rollback or missing files.".to_string(),
+                });
             }
         }
 

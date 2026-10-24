@@ -717,6 +717,11 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                             bundle_path: bundle_path_str.clone(),
                             keys_path: None,
                             allow_rollback,
+                            rollback_confirmation_token: if allow_rollback {
+                                Some("CONFIRM_ADVISORY_ROLLBACK".to_string())
+                            } else {
+                                None
+                            },
                         })?),
                     };
                     stream.write_all(&serde_json::to_vec(&req)?)?;
