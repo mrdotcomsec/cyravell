@@ -198,6 +198,56 @@ export interface PostOperationVerificationResult {
   notes: string[];
 }
 
+export interface AdvisoryStatus {
+  database_version: string;
+  source: 'EMBEDDED' | 'LOCAL_FILE' | 'IMPORTED_BUNDLE';
+  source_name: string;
+  publisher?: string;
+  key_id?: string;
+  fingerprint: string;
+  records_count: number;
+  malicious_count: number;
+  vulnerabilities_count: number;
+  last_updated?: string;
+  verification_status: string;
+  min_cyravell_version?: string;
+}
+
+export interface BundleInspectionResult {
+  bundle_format_version: string;
+  database_version: string;
+  created_at: string;
+  publisher: string;
+  key_id: string;
+  is_valid: boolean;
+  signature_valid: boolean;
+  candidate_version: string;
+  active_version: string;
+  would_rollback: boolean;
+  records_count: number;
+  malicious_count: number;
+  vulnerabilities_count: number;
+  new_records: string[];
+  updated_records: string[];
+  removed_records: string[];
+  summary: string;
+}
+
+export interface BundleImportResult {
+  success: boolean;
+  previous_version: string;
+  new_version: string;
+  publisher: string;
+  key_id: string;
+  records_count: number;
+  malicious_count: number;
+  fingerprint: string;
+  affected_workspaces: string[];
+  rollback_authorized: boolean;
+  audit_sequence: number;
+  message: string;
+}
+
 export interface SecurityEventItem {
   event: {
     id: string;
@@ -552,6 +602,42 @@ export class EngineClient extends EventEmitter {
     return this.call('package.monitor_workspace', {
       workspace_path: workspacePath,
       register,
+    });
+  }
+
+  public async getAdvisoryStatus(): Promise<AdvisoryStatus> {
+    if (this.state !== 'CONNECTED') {
+      throw new Error('Engine is not connected');
+    }
+    const res = await this.call('package.get_advisory_status', {});
+    return res.status;
+  }
+
+  public async inspectAdvisoryBundle(
+    bundlePath: string,
+    keysPath?: string
+  ): Promise<BundleInspectionResult> {
+    if (this.state !== 'CONNECTED') {
+      throw new Error('Engine is not connected');
+    }
+    return this.call('package.inspect_advisory_bundle', {
+      bundle_path: bundlePath,
+      keys_path: keysPath,
+    });
+  }
+
+  public async importAdvisoryBundle(
+    bundlePath: string,
+    allowRollback: boolean = false,
+    keysPath?: string
+  ): Promise<BundleImportResult> {
+    if (this.state !== 'CONNECTED') {
+      throw new Error('Engine is not connected');
+    }
+    return this.call('package.import_advisory_bundle', {
+      bundle_path: bundlePath,
+      allow_rollback: allowRollback,
+      keys_path: keysPath,
     });
   }
 

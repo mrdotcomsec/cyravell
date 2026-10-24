@@ -229,4 +229,22 @@ impl BaselineStore {
             store.remove(&key);
         }
     }
+
+    /// Returns a list of all workspace paths currently registered in the store.
+    pub fn all_workspaces(&self) -> Vec<PathBuf> {
+        self.baselines
+            .read()
+            .ok()
+            .map(|b| b.keys().cloned().collect())
+            .unwrap_or_default()
+    }
+
+    /// Returns all registered baselines as (PathBuf, DependencyBaseline) tuples.
+    pub fn all_baselines(&self) -> Vec<(PathBuf, DependencyBaseline)> {
+        self.baselines
+            .read()
+            .ok()
+            .map(|b| b.iter().map(|(p, v)| (p.clone(), v.clone())).collect())
+            .unwrap_or_default()
+    }
 }

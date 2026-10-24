@@ -1,6 +1,6 @@
 # Cyravell — Threat Model
 
-**Version:** 2.6.0 (Phase 2.6: Post-Installation Package Integrity & Drift Monitoring)  
+**Version:** 2.7.0 (Phase 2.7: Secure Advisory Intelligence Updates & Rollback Protection)  
 **Status:** Approved  
 **Classification:** Public / Open Source  
 
@@ -165,6 +165,23 @@ We classify potential threat actors into the following tiers:
 - **Threat Model Boundaries & Non-Claims:**
   - **Filesystem Event Attribution:** Filesystem monitoring proves *that* a file changed, not *which* process initiated the write. Cyravell refuses to fabricate process attribution for background file events without verified execution context.
   - **Scope of Continuous Monitoring:** Cyravell monitors authoritative project manifest and lockfile targets, not every file in `node_modules/` or arbitrary workspace directories, avoiding I/O exhaustion.
+
+### 5.8 Advisory Intelligence Poisoning, Rollback Attacks, & Unauthenticated Bundle Injection (Phase 2.7)
+- **Threat:**
+  - **Advisory Poisoning:** An attacker or rogue entity crafts a fraudulent advisory bundle to delete malicious package indicators or inject false security claims.
+  - **Rollback Attacks:** An attacker forces Cyravell to revert to an older, obsolete advisory database version where recently discovered malware was not yet classified as malicious, unblocking hostile dependencies.
+  - **Signature Bypass / Key Forgery:** An attacker provides an unauthenticated or self-signed bundle or tampers with the advisory payload while leaving the signature header intact.
+  - **Partial Write / Atomic Activation Failure:** A crash or filesystem interruption during bundle update leaves a partially written or corrupted advisory database on disk.
+  - **TOCTOU Approval Bypass:** A pending command awaiting developer review targets a package newly identified as malicious in an updated bundle.
+- **Mitigation:**
+  - **Asymmetric Ed25519 Cryptographic Signatures:** Every advisory bundle is cryptographically verified against pinned public keys in `rules/trusted_keys.json`. Ordinary SHA-256 digests are never accepted as proof of origin.
+  - **Canonical Payload Digest Binding:** A canonical SHA-256 digest binds the exact sorted advisory set to the signed bundle header, preventing payload substitution or record injection.
+  - **Strict Monotonic Versioning & Anti-Rollback Invariant:** Candidate bundles with `candidate_version <= active_version` are rejected by default with `RollbackRejected`. Rollback overrides require explicit `--allow-rollback` authorization, and rollback can never clear or weaken active hard blocks in monitored workspaces.
+  - **Safe Atomic Transactions:** Updates stage to a unique temporary file (`.tmp.<uuid>`), execute `sync_all()`, and atomically overwrite destination storage via atomic rename, followed by thread-safe `RwLock` in-memory database replacement.
+  - **Embedded Fallback Resiliency:** Corrupted, truncated, or unreadable external database files automatically trigger clean fallback to the embedded runtime database.
+  - **Dynamic Invalidation & Reassessment:** Importing updated advisories automatically triggers full re-evaluation of all registered workspace dependency baselines and immediate hard-block enforcement for newly detected malicious packages.
+- **Threat Model Boundaries & Non-Claims:**
+  - **Signature Authenticity vs. Advisory Accuracy:** A valid cryptographic signature proves that a bundle originated from a trusted publisher with an authenticated private key. It does *not* prove that every advisory record is complete, bug-free, or exhaustive against all real-world malware.
 
 ---
 

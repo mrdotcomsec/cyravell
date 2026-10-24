@@ -100,6 +100,24 @@ export class StatusViewProvider implements vscode.TreeDataProvider<StatusItem> {
           )
         );
       }
+
+      // Advisory Intelligence
+      try {
+        const advStatus = await this.client.getAdvisoryStatus();
+        if (advStatus) {
+          items.push(
+            new StatusItem(
+              'Advisory Intelligence',
+              `v${advStatus.database_version} (${advStatus.records_count} records)`,
+              vscode.TreeItemCollapsibleState.None,
+              'database',
+              `Active Advisory Database:\nVersion: ${advStatus.database_version}\nSource: ${advStatus.source} (${advStatus.source_name})\nPublisher: ${advStatus.publisher || 'Cyravell Core'}\nKey ID: ${advStatus.key_id || 'embedded'}\nMalicious Definitions: ${advStatus.malicious_count}\nVulnerabilities: ${advStatus.vulnerabilities_count}\nFingerprint: ${advStatus.fingerprint}`
+            )
+          );
+        }
+      } catch (e) {
+        // Safe degrade if advisory query fails
+      }
     } else if (state === 'CONNECTING') {
       items.push(
         new StatusItem(

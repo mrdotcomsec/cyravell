@@ -23,8 +23,8 @@ cleanup() {
 trap cleanup EXIT
 
 echo "╔══════════════════════════════════════════════════════════════╗"
-echo "║          Cyravell Phase 2.6: Post-Installation Package       ║"
-echo "║         Integrity & Dependency-Drift Monitoring Demo         ║"
+echo "║       Cyravell Phase 2.7: Secure Advisory Intelligence       ║"
+echo "║          Updates and Rollback Protection Demo                ║"
 echo "╚══════════════════════════════════════════════════════════════╝"
 echo ""
 
@@ -119,17 +119,25 @@ echo "--- Testing dependency baselining, drift detection, and post-operation ver
 "${ROOT_DIR}/target/debug/cyravell-test-harness" --socket-path "${DEMO_SOCK}" test-drift-monitor
 echo ""
 
-echo "[Step 12] Verifying cryptographic audit log hash chain..."
+echo "[Step 12] Demonstrating Phase 2.7 Secure Advisory Intelligence Updates & Rollback Protection..."
+echo "--- Testing advisory database status via CLI ---"
+"${ROOT_DIR}/target/debug/cyravell-engine" --socket-path "${DEMO_SOCK}" advisory status
+echo ""
+echo "--- Running advisory bundle update and anti-rollback validation suite over IPC ---"
+"${ROOT_DIR}/target/debug/cyravell-test-harness" --socket-path "${DEMO_SOCK}" test-advisory-updates
+echo ""
+
+echo "[Step 13] Verifying cryptographic audit log hash chain..."
 "${ROOT_DIR}/target/debug/cyravell-engine" verify-audit \
   --audit-file "${DEMO_DATA}/audit.log"
 echo ""
 
-echo "[Step 13] Demonstrating tamper detection on disposable audit log copy..."
+echo "[Step 14] Demonstrating tamper detection on disposable audit log copy..."
 "${ROOT_DIR}/target/debug/cyravell-test-harness" --socket-path "${DEMO_SOCK}" \
   test-tamper-detection
 echo ""
 
-echo "[Step 14] Orderly engine shutdown..."
+echo "[Step 15] Orderly engine shutdown..."
 "${ROOT_DIR}/target/debug/cyravell-engine" --socket-path "${DEMO_SOCK}" stop
 wait "${ENGINE_PID}" 2>/dev/null || true
 unset ENGINE_PID
@@ -140,5 +148,5 @@ echo "--- Testing Fail-Closed enforcement when engine is offline ---"
 echo ""
 
 echo "══════════════════════════════════════════════════════════════"
-echo "  Phase 2.6 demonstration completed successfully!"
+echo "  Phase 2.7 demonstration completed successfully!"
 echo "══════════════════════════════════════════════════════════════"

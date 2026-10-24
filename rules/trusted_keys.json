@@ -1,0 +1,13 @@
+{
+  "version": "1.0",
+  "keys": [
+    {
+      "key_id": "cyravell-sec-official-2026",
+      "publisher": "Cyravell Security Intelligence Team",
+      "public_key_hex": "68b910547a547804e106aa41612d1deb43f5857a1b82a9d586ac49a245699278",
+      "created_at": "2026-01-01T00:00:00Z",
+      "expires_at": null,
+      "is_active": true
+    }
+  ]
+}

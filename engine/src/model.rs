@@ -105,6 +105,24 @@ pub enum Severity {
     Critical,
 }
 
+impl Severity {
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            Self::Info => "INFO",
+            Self::Low => "LOW",
+            Self::Medium => "MEDIUM",
+            Self::High => "HIGH",
+            Self::Critical => "CRITICAL",
+        }
+    }
+}
+
+impl std::fmt::Display for Severity {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "{}", self.as_str())
+    }
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "SCREAMING_SNAKE_CASE")]
 pub enum AnalysisCompleteness {
@@ -508,6 +526,24 @@ pub enum PackageEcosystem {
     Cargo,
 }
 
+impl PackageEcosystem {
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            Self::Npm => "NPM",
+            Self::Pnpm => "PNPM",
+            Self::Yarn => "YARN",
+            Self::Pip => "PIP",
+            Self::Cargo => "CARGO",
+        }
+    }
+}
+
+impl std::fmt::Display for PackageEcosystem {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "{}", self.as_str())
+    }
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "SCREAMING_SNAKE_CASE")]
 pub enum PackageOperation {
@@ -761,4 +797,118 @@ pub struct PackageMonitorWorkspaceResult {
     pub workspace_path: String,
     pub active_files: Vec<String>,
     pub message: String,
+}
+
+// ---------------------------------------------------------------------------
+// Phase 2.7: Secure Advisory Intelligence Updates & Rollback Protection Models
+// ---------------------------------------------------------------------------
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "SCREAMING_SNAKE_CASE")]
+pub enum AdvisoryDatabaseSource {
+    Embedded,
+    LocalFile,
+    ImportedBundle,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct AdvisoryStatus {
+    pub database_version: String,
+    pub source: AdvisoryDatabaseSource,
+    pub source_name: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub publisher: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub key_id: Option<String>,
+    pub fingerprint: String,
+    pub records_count: usize,
+    pub malicious_count: usize,
+    pub vulnerabilities_count: usize,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub last_updated: Option<DateTime<Utc>>,
+    pub verification_status: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub min_cyravell_version: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct TrustedKey {
+    pub key_id: String,
+    pub publisher: String,
+    pub public_key_hex: String,
+    pub created_at: DateTime<Utc>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub expires_at: Option<DateTime<Utc>>,
+    #[serde(default = "default_true")]
+    pub is_active: bool,
+}
+
+fn default_true() -> bool {
+    true
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct TrustedKeysFile {
+    pub version: String,
+    pub keys: Vec<TrustedKey>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct BundleInspectionResult {
+    pub bundle_format_version: String,
+    pub database_version: String,
+    pub created_at: DateTime<Utc>,
+    pub publisher: String,
+    pub key_id: String,
+    pub is_valid: bool,
+    pub signature_valid: bool,
+    pub candidate_version: String,
+    pub active_version: String,
+    pub would_rollback: bool,
+    pub records_count: usize,
+    pub malicious_count: usize,
+    pub vulnerabilities_count: usize,
+    pub new_records: Vec<String>,
+    pub updated_records: Vec<String>,
+    pub removed_records: Vec<String>,
+    pub summary: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct BundleImportResult {
+    pub previous_version: String,
+    pub new_version: String,
+    pub publisher: String,
+    pub key_id: String,
+    pub records_count: usize,
+    pub malicious_count: usize,
+    pub fingerprint: String,
+    pub affected_workspaces: Vec<String>,
+    pub rollback_authorized: bool,
+    pub audit_sequence: u64,
+    pub message: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct PackageInspectAdvisoryBundleParams {
+    pub bundle_path: String,
+    #[serde(default)]
+    pub keys_path: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct PackageImportAdvisoryBundleParams {
+    pub bundle_path: String,
+    #[serde(default)]
+    pub keys_path: Option<String>,
+    #[serde(default)]
+    pub allow_rollback: bool,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct PackageGetAdvisoryStatusParams {}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct PackageGetAdvisoryStatusResult {
+    pub status: AdvisoryStatus,
 }

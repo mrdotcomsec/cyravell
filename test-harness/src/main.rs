@@ -70,6 +70,8 @@ enum Commands {
     TestPackageGate,
     /// Test dependency baselining, drift detection, and monitoring (Phase 2.6)
     TestDriftMonitor,
+    /// Test advisory intelligence updates and rollback protection (Phase 2.7)
+    TestAdvisoryUpdates,
     /// Run comprehensive automated integration test suite
     RunSuite,
 }
@@ -614,17 +616,34 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             println!("  ✓ All Phase 2.4 adversarial validation checks passed!");
 
             // 11. Phase 2.5 Package Security Enforcement
-            println!("\n[11/12] Testing Phase 2.5 package security enforcement over IPC...");
+            println!("\n[11/13] Testing Phase 2.5 package security enforcement over IPC...");
             run_package_gate_suite(&socket_path)?;
             println!("  ✓ All Phase 2.5 package security enforcement checks passed!");
 
             // 12. Phase 2.6 Dependency Baselining & Drift Monitoring
-            println!("\n[12/12] Testing Phase 2.6 dependency baselining and drift monitoring over IPC...");
+            println!("\n[12/13] Testing Phase 2.6 dependency baselining and drift monitoring over IPC...");
             run_drift_monitor_suite(&socket_path)?;
             println!("  ✓ All Phase 2.6 dependency baselining and drift monitoring checks passed!");
 
+            // 13. Phase 2.7 Advisory Intelligence Updates & Rollback Protection
+            println!(
+                "\n[13/13] Testing Phase 2.7 advisory updates and rollback protection over IPC..."
+            );
+            run_advisory_update_suite(&socket_path)?;
+            println!("  ✓ All Phase 2.7 advisory updates and rollback protection checks passed!");
+
             println!("\n══════════════════════════════════════════════════════════════");
-            println!("  ALL INTEGRATION TESTS PASSED (12/12)");
+            println!("  ALL INTEGRATION TESTS PASSED (13/13)");
+            println!("══════════════════════════════════════════════════════════════");
+        }
+
+        Commands::TestAdvisoryUpdates => {
+            println!("══════════════════════════════════════════════════════════════");
+            println!("  Phase 2.7: Advisory Intelligence Updates & Rollback Tests   ");
+            println!("══════════════════════════════════════════════════════════════");
+            run_advisory_update_suite(&socket_path)?;
+            println!("\n══════════════════════════════════════════════════════════════");
+            println!("  ALL ADVISORY UPDATE & ROLLBACK PROTECTION TESTS PASSED!     ");
             println!("══════════════════════════════════════════════════════════════");
         }
 
@@ -1221,6 +1240,212 @@ fn run_drift_monitor_suite(socket_path: &PathBuf) -> Result<(), Box<dyn std::err
     let mon_obj = monitor_res.result.expect("monitor_workspace failed");
     assert_eq!(mon_obj["monitored"], true);
     println!("  ✓ 6. Workspace registered for continuous bounded local monitoring");
+
+    Ok(())
+}
+
+fn run_advisory_update_suite(socket_path: &PathBuf) -> Result<(), Box<dyn std::error::Error>> {
+    use cyravell_engine::package::{
+        compute_canonical_payload_digest, AdvisoryBundle, AdvisoryRecord,
+    };
+    use ed25519_dalek::{Signer, SigningKey};
+    use sha2::{Digest, Sha256};
+
+    // 1. package.get_advisory_status
+    let status_res = send_rpc(socket_path, "package.get_advisory_status", None)?;
+    let status_obj = status_res.result.expect("get_advisory_status failed");
+    let initial_status = &status_obj["status"];
+    let current_version = initial_status["database_version"]
+        .as_str()
+        .unwrap()
+        .to_string();
+    assert!(!current_version.is_empty());
+    assert!(initial_status["records_count"].as_u64().unwrap() > 0);
+    println!(
+        "  ✓ 1. Query advisory status succeeded: version={}, total_records={}",
+        current_version,
+        initial_status["records_count"].as_u64().unwrap()
+    );
+
+    let parts = current_version
+        .split('.')
+        .map(|s| s.parse::<u64>().unwrap_or(0))
+        .collect::<Vec<_>>();
+    let next_major = parts.first().unwrap_or(&2026) + 1;
+    let candidate_version = format!("{}.1.0", next_major);
+
+    // Prepare signing key matching rules/trusted_keys.json (key_id: cyravell-sec-official-2026)
+    let official_seed: [u8; 32] = Sha256::digest(b"cyravell-official-signing-key-seed-2026").into();
+    let official_sk = SigningKey::from_bytes(&official_seed);
+
+    let test_dir = tempdir()?;
+
+    // Helper to build a signed bundle
+    let make_bundle = |sk: &SigningKey,
+                       key_id: &str,
+                       pub_name: &str,
+                       version: &str,
+                       advs: Vec<AdvisoryRecord>|
+     -> AdvisoryBundle {
+        let payload_digest = compute_canonical_payload_digest(&advs);
+        let mut bundle = AdvisoryBundle {
+            bundle_format_version: "1.0".to_string(),
+            database_version: version.to_string(),
+            created_at: Utc::now(),
+            publisher: pub_name.to_string(),
+            key_id: key_id.to_string(),
+            min_cyravell_version: Some("0.1.0".to_string()),
+            supported_ecosystems: vec![
+                cyravell_engine::model::PackageEcosystem::Npm,
+                cyravell_engine::model::PackageEcosystem::Pip,
+                cyravell_engine::model::PackageEcosystem::Cargo,
+            ],
+            payload_digest,
+            signature: String::new(),
+            advisories: advs,
+        };
+        let signing_bytes = bundle.canonical_signing_bytes();
+        let sig = sk.sign(&signing_bytes);
+        bundle.signature = hex::encode(sig.to_bytes());
+        bundle
+    };
+
+    let sample_adv = AdvisoryRecord {
+        id: "CYR-HARNESS-ADV-01".to_string(),
+        ecosystem: cyravell_engine::model::PackageEcosystem::Npm,
+        package_name: "harness-malware-test".to_string(),
+        severity: Severity::Critical,
+        is_malicious: true,
+        affected_range: ">= 1.0.0".to_string(),
+        fixed_version: None,
+        title: "Test Malware Finding".to_string(),
+        details: "Harness test advisory".to_string(),
+        cve_id: None,
+        provenance: Some("Cyravell Test Harness".to_string()),
+        is_synthetic: false,
+    };
+
+    // 2. package.inspect_advisory_bundle
+    let mut update_advs = cyravell_engine::package::AdvisoryDatabase::load_embedded()
+        .all_advisories()
+        .to_vec();
+    update_advs.push(sample_adv.clone());
+
+    let inspect_bundle = make_bundle(
+        &official_sk,
+        "cyravell-sec-official-2026",
+        "Cyravell Security Intelligence Team",
+        &candidate_version,
+        update_advs,
+    );
+    let inspect_file = test_dir.path().join("inspect_bundle.json");
+    std::fs::write(
+        &inspect_file,
+        serde_json::to_string_pretty(&inspect_bundle)?,
+    )?;
+
+    let inspect_res = send_rpc(
+        socket_path,
+        "package.inspect_advisory_bundle",
+        Some(serde_json::json!({
+            "bundle_path": inspect_file.display().to_string()
+        })),
+    )?;
+    let insp_obj = inspect_res.result.expect("inspect_advisory_bundle failed");
+    assert_eq!(insp_obj["is_valid"], true);
+    assert_eq!(insp_obj["signature_valid"], true);
+    assert_eq!(insp_obj["candidate_version"], candidate_version);
+    println!(
+        "  ✓ 2. Bundle inspection verified signature and diff: valid=true, candidate={}",
+        candidate_version
+    );
+
+    // 3. Rollback rejection test
+    let rollback_bundle = make_bundle(
+        &official_sk,
+        "cyravell-sec-official-2026",
+        "Cyravell Security Intelligence Team",
+        "0.1.0", // Strictly older version than any active version
+        vec![sample_adv.clone()],
+    );
+    let rollback_file = test_dir.path().join("rollback_bundle.json");
+    std::fs::write(
+        &rollback_file,
+        serde_json::to_string_pretty(&rollback_bundle)?,
+    )?;
+
+    let rollback_res = send_rpc(
+        socket_path,
+        "package.import_advisory_bundle",
+        Some(serde_json::json!({
+            "bundle_path": rollback_file.display().to_string(),
+            "allow_rollback": false
+        })),
+    )?;
+    assert!(
+        rollback_res.error.is_some(),
+        "Rollback attempt without allow_rollback must be rejected"
+    );
+    println!("  ✓ 3. Anti-rollback protection enforced: older bundle 0.1.0 rejected");
+
+    // 4. Untrusted rogue key rejection test
+    let rogue_sk = SigningKey::from_bytes(&[99u8; 32]);
+    let rogue_bundle = make_bundle(
+        &rogue_sk,
+        "untrusted-unknown-key",
+        "Untrusted Entity",
+        "9999.01.01",
+        vec![sample_adv.clone()],
+    );
+    let rogue_file = test_dir.path().join("rogue_bundle.json");
+    std::fs::write(&rogue_file, serde_json::to_string_pretty(&rogue_bundle)?)?;
+
+    let rogue_res = send_rpc(
+        socket_path,
+        "package.import_advisory_bundle",
+        Some(serde_json::json!({
+            "bundle_path": rogue_file.display().to_string(),
+            "allow_rollback": false
+        })),
+    )?;
+    assert!(
+        rogue_res.error.is_some(),
+        "Bundle signed with untrusted key must be rejected"
+    );
+    println!("  ✓ 4. Cryptographic authentication enforced: untrusted publisher key rejected");
+
+    // 5. package.import_advisory_bundle (atomic activation)
+    let import_res = send_rpc(
+        socket_path,
+        "package.import_advisory_bundle",
+        Some(serde_json::json!({
+            "bundle_path": inspect_file.display().to_string(),
+            "allow_rollback": false
+        })),
+    )?;
+    let imp_obj = import_res.result.expect("import_advisory_bundle failed");
+    assert_eq!(imp_obj["new_version"], candidate_version);
+    println!(
+        "  ✓ 5. Bundle atomic import and activation succeeded: new_version={}, audit_seq={}",
+        imp_obj["new_version"].as_str().unwrap(),
+        imp_obj["audit_sequence"]
+    );
+
+    // 6. Verify newly imported database status over IPC
+    let updated_status_res = send_rpc(socket_path, "package.get_advisory_status", None)?;
+    let updated_status = updated_status_res
+        .result
+        .expect("get_advisory_status failed");
+    assert_eq!(
+        updated_status["status"]["database_version"]
+            .as_str()
+            .unwrap(),
+        candidate_version
+    );
+    println!(
+        "  ✓ 6. Verified live active engine using newly activated intelligence (version: {})",
+        candidate_version
+    );
 
     Ok(())
 }

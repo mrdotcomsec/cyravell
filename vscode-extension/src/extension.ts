@@ -256,6 +256,66 @@ export function activate(context: vscode.ExtensionContext) {
     })
   );
 
+  context.subscriptions.push(
+    vscode.commands.registerCommand('cyravell.inspectAdvisories', async () => {
+      try {
+        const fileUris = await vscode.window.showOpenDialog({
+          canSelectMany: false,
+          openLabel: 'Inspect Advisory Bundle',
+          filters: { 'JSON Files': ['json'] },
+        });
+        if (!fileUris || fileUris.length === 0) {
+          return;
+        }
+        const filePath = fileUris[0].fsPath;
+        const res = await client!.inspectAdvisoryBundle(filePath);
+        vscode.window.showInformationMessage(
+          `Advisory Bundle: v${res.database_version} by ${res.publisher}. Valid: ${res.is_valid}, Signature: ${res.signature_valid}. Advisories: ${res.records_count} (+${res.new_records.length}, ~${res.updated_records.length}, -${res.removed_records.length}). ${res.summary}`
+        );
+      } catch (e: any) {
+        vscode.window.showErrorMessage(`Failed to inspect advisory bundle: ${e.message}`);
+      }
+    })
+  );
+
+  context.subscriptions.push(
+    vscode.commands.registerCommand('cyravell.importAdvisories', async () => {
+      try {
+        const fileUris = await vscode.window.showOpenDialog({
+          canSelectMany: false,
+          openLabel: 'Import Advisory Bundle',
+          filters: { 'JSON Files': ['json'] },
+        });
+        if (!fileUris || fileUris.length === 0) {
+          return;
+        }
+        const filePath = fileUris[0].fsPath;
+        const inspection = await client!.inspectAdvisoryBundle(filePath);
+        let allowRollback = false;
+        if (inspection.would_rollback) {
+          const choice = await vscode.window.showWarningMessage(
+            `Candidate version ${inspection.candidate_version} is older than or equal to active version ${inspection.active_version}. Allow rollback?`,
+            { modal: true },
+            'Allow Rollback',
+            'Cancel'
+          );
+          if (choice !== 'Allow Rollback') {
+            return;
+          }
+          allowRollback = true;
+        }
+
+        const res = await client!.importAdvisoryBundle(filePath, allowRollback);
+        vscode.window.showInformationMessage(
+          `Advisory bundle v${res.new_version} activated! Total advisories: ${res.records_count}, Reassessed baselines: ${res.affected_workspaces.length}. Status: ${res.message}`
+        );
+        statusProvider.refresh();
+      } catch (e: any) {
+        vscode.window.showErrorMessage(`Failed to import advisory bundle: ${e.message}`);
+      }
+    })
+  );
+
   // Monitor terminal sessions for honest status reporting
   context.subscriptions.push(vscode.window.onDidOpenTerminal(() => statusProvider.refresh()));
   context.subscriptions.push(vscode.window.onDidCloseTerminal(() => statusProvider.refresh()));

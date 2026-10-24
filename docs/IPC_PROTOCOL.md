@@ -810,4 +810,129 @@ Registers or unregisters a workspace directory for continuous, resource-bounded 
 }
 ```
 
+---
+
+### 3.18 `package.get_advisory_status` (Phase 2.7)
+Queries active package vulnerability and malicious package intelligence database status, provenance, version, record counts, and engine compatibility.
+
+**Request:**
+```json
+{
+  "jsonrpc": "2.0",
+  "id": "18",
+  "method": "package.get_advisory_status",
+  "params": {}
+}
+```
+
+**Response:**
+```json
+{
+  "jsonrpc": "2.0",
+  "id": "18",
+  "result": {
+    "status": {
+      "database_version": "2026.04.1",
+      "source": "EMBEDDED",
+      "source_name": "embedded_fallback",
+      "publisher": "Cyravell Core",
+      "key_id": "cyravell-sec-official-2026",
+      "fingerprint": "a3f5c7...",
+      "records_count": 16,
+      "malicious_count": 10,
+      "vulnerabilities_count": 6,
+      "last_updated": "2026-04-01T00:00:00Z",
+      "verification_status": "AUTHENTICATED",
+      "min_cyravell_version": "0.1.0"
+    }
+  }
+}
+```
+
+---
+
+### 3.19 `package.inspect_advisory_bundle` (Phase 2.7)
+Inspects a local advisory bundle file without applying it. Performs Ed25519 cryptographic signature authentication, schema verification, payload digest verification, and calculates differences against the active database.
+
+**Request:**
+```json
+{
+  "jsonrpc": "2.0",
+  "id": "19",
+  "method": "package.inspect_advisory_bundle",
+  "params": {
+    "bundle_path": "/tmp/advisory-bundle-2026.05.01.json",
+    "keys_path": null
+  }
+}
+```
+
+**Response:**
+```json
+{
+  "jsonrpc": "2.0",
+  "id": "19",
+  "result": {
+    "bundle_format_version": "1.0",
+    "database_version": "2026.05.01",
+    "created_at": "2026-05-01T12:00:00Z",
+    "publisher": "Cyravell Security Intelligence Team",
+    "key_id": "cyravell-sec-official-2026",
+    "is_valid": true,
+    "signature_valid": true,
+    "candidate_version": "2026.05.01",
+    "active_version": "2026.04.1",
+    "would_rollback": false,
+    "records_count": 25,
+    "malicious_count": 15,
+    "vulnerabilities_count": 10,
+    "new_records": ["CYR-MAL-NPM-101 (malicious-miner-x)"],
+    "updated_records": ["CYR-VULN-NPM-001 (lodash)"],
+    "removed_records": [],
+    "summary": "Candidate v2026.05.01 by 'Cyravell Security Intelligence Team': 25 records (1 new, 1 updated, 0 removed, 15 malicious). Valid: true, Would rollback: false"
+  }
+}
+```
+
+---
+
+### 3.20 `package.import_advisory_bundle` (Phase 2.7)
+Authenticates, validates, atomically persists, and activates an advisory update bundle. Atomically swaps the active in-memory database, records a tamper-evident audit record, and automatically re-evaluates dependency baselines across all monitored workspaces. Enforces anti-rollback unless `allow_rollback: true` is explicitly authorized.
+
+**Request:**
+```json
+{
+  "jsonrpc": "2.0",
+  "id": "20",
+  "method": "package.import_advisory_bundle",
+  "params": {
+    "bundle_path": "/tmp/advisory-bundle-2026.05.01.json",
+    "allow_rollback": false,
+    "keys_path": null
+  }
+}
+```
+
+**Response:**
+```json
+{
+  "jsonrpc": "2.0",
+  "id": "20",
+  "result": {
+    "success": true,
+    "previous_version": "2026.04.1",
+    "new_version": "2026.05.01",
+    "publisher": "Cyravell Security Intelligence Team",
+    "key_id": "cyravell-sec-official-2026",
+    "records_count": 25,
+    "malicious_count": 15,
+    "fingerprint": "b78d2...",
+    "affected_workspaces": ["/workspace/project"],
+    "rollback_authorized": false,
+    "audit_sequence": 29,
+    "message": "Advisory bundle v2026.05.01 successfully imported and activated"
+  }
+}
+```
+
 

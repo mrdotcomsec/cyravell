@@ -421,5 +421,75 @@ The `WorkspaceMonitor` provides continuous, resource-bounded observation of proj
 - **Honest Attribution:** Filesystem monitoring detects *that* files changed, but cannot authoritatively prove *which* process modified them without a synchronized execution context. Cyravell explicitly labels background reconciliation events as `"Observed via local filesystem reconciliation (unattributed background change)"`.
 - **Credential Redaction:** The engine analyzer and audit logger scrub secret tokens, password flags (`--password=`, `token=`), and URL userinfo credentials (`https://user:secret@registry.npmjs.org/`) before persisting audit records or presenting notifications.
 
+---
+
+## 11. Secure Advisory Intelligence Updates & Rollback Protection (Phase 2.7)
+
+Cyravell Phase 2.7 implements cryptographic authentication, schema validation, atomic activation, and rollback protection for package vulnerability and malicious package intelligence while strictly preserving local-first, offline operating principles.
+
+```
+┌─────────────────────────────────────────────────────────────────────────────┐
+│                       Advisory Update Architecture                          │
+└─────────────────────────────────────────────────────────────────────────────┘
+  [ Signed Bundle ] ───► [ TrustedKeyStore ] (Ed25519 Verify)
+         │                         │
+         ▼                         ▼
+  [ Payload Digest ] ──► [ Anti-Rollback Check ] (Candidate > Active Version)
+         │                         │
+         ▼                         ▼
+  [ Schema Validation ] ─► [ Safe Transaction ] (Tempfile Sync + Rename)
+         │                         │
+         ▼                         ▼
+  [ In-Memory Swap ] ────► [ Atomic Assessor RwLock ] (Zero Reader Downtime)
+         │                         │
+         ▼                         ▼
+  [ Baseline Re-scan ] ──► [ Active Drift / Gate Hard-Block ]
+         │                         │
+         ▼                         ▼
+  [ Audit Record ] ─────► [ SHA-256 Tamper-Evident Chain ]
+```
+
+### 11.1 Versioned Advisory Bundle Format
+Advisory intelligence is distributed in standardized, cryptographically bound JSON bundles (`AdvisoryBundle`):
+- `bundle_format_version`: Format standard identifier (currently `"1.0"`).
+- `database_version`: Monotonically incrementing calendar version (`YYYY.MM.DD` or SemVer).
+- `created_at`: RFC 3339 UTC timestamp.
+- `publisher`: Publisher entity name.
+- `key_id`: Cryptographic identifier of the signing key.
+- `min_cyravell_version`: Minimum supported engine version.
+- `supported_ecosystems`: Array of package ecosystems covered.
+- `payload_digest`: SHA-256 digest over the canonical serialization of all advisory records sorted deterministically by `(ecosystem, package_name, id)`.
+- `signature`: Hex-encoded Ed25519 signature over domain-separated canonical signing bytes (`CYRAVELL-ADVISORY-BUNDLE-V1\n...`).
+- `advisories`: Array of `AdvisoryRecord` objects.
+
+### 11.2 Ed25519 Cryptographic Trust Model
+- **Public-Key Trust Store:** Managed via `rules/trusted_keys.json` and `TrustedKeyStore`. Private keys are never embedded in the repository or binary.
+- **Strict Signature Verification:** Bundles must be signed with a known, active, non-expired public key. Ordinary SHA-256 digests are never accepted as proof of publisher identity.
+- **Signature Domain Separation:** Canonical signing string prepends `CYRAVELL-ADVISORY-BUNDLE-V1\n` with line-delimited key-value metadata to prevent cross-protocol signature substitution.
+
+### 11.3 Safe Update Transactions & Atomic Activation
+The update workflow implemented in `AdvisoryUpdater` guarantees atomic all-or-nothing activation:
+1. **Validation & Authentication:** Before touching disk or memory, the candidate bundle's format, engine compatibility, payload digest, signature, and record integrity are fully verified.
+2. **Atomic Disk Persistence:** The new database is written to a unique temporary file (`advisories.json.tmp.<uuid>`), synced to physical storage (`file.sync_all()`), and atomically renamed over the active destination file.
+3. **In-Memory Atomic Swap:** `PackageSecurityAssessor` maintains its database behind an `Arc<RwLock<AdvisoryDatabase>>`. Update activation writes the new database in a brief write lock, allowing concurrent readers (`query`, `is_malicious_package`) to transition cleanly with zero downtime or partial state reads.
+4. **Failure Preservation:** If any validation, signature, or disk write step fails, the previous active database remains 100% functional and completely unchanged.
+
+### 11.4 Rollback Protection Invariant
+- **Monotonic Version Comparison:** The candidate `database_version` is parsed into numerical segments and compared against the currently active database version.
+- **Rollback Rejection:** Updates where `candidate <= active` are rejected by default with `BundleValidationError::RollbackRejected`.
+- **Authorized Rollback Override:** Developer can explicitly pass `--allow-rollback` via CLI or set `allow_rollback: true` over IPC.
+- **Hard-Block Preservation:** Rollback never weakens active hard blocks: existing `MaliciousPackageDetected` active drift findings in monitored workspaces are retained and cannot be cleared by rolling back the advisory database.
+
+### 11.5 Baseline Reassessment & Pending Approval Invalidation
+- **Automatic Baseline Reassessment:** Upon successful bundle activation, `AdvisoryUpdater` automatically re-evaluates all registered workspace baselines against the updated intelligence.
+- **Immediate Hard-Block Registration:** If an active project contains a package newly flagged as malicious, an active drift finding (`MaliciousPackageDetected`) is registered immediately, triggering gate hard-blocks on subsequent commands.
+- **Pending Approval Invalidation:** Any pending command approval or execution authorization for commands involving newly flagged malicious packages is invalidated.
+
+### 11.6 Embedded Fallback & Offline Resilience
+- **Offline Intelligence:** The system does not contact remote servers or download data automatically. Bundles are imported locally and explicitly.
+- **Embedded Clean Fallback:** If the external persistent database file is corrupted, truncated, or unreadable, `AdvisoryDatabase::load_with_fallback` automatically activates the embedded clean intelligence bundled inside the engine binary.
+- **Distinction Between Authenticity and Accuracy:** A verified Ed25519 signature proves the bundle was published by a trusted authority; Cyravell treats advisory intelligence as defense-in-depth risk heuristics rather than infallible proofs of complete software safety.
+
+
 
 

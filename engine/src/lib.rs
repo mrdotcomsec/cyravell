@@ -20,7 +20,7 @@ pub use integrity::{compute_file_sha256, verify_manifest, IntegrityStatus};
 pub use ipc::IpcServer;
 pub use model::*;
 pub use package::{
-    BaselineStore, DriftDetector, PackageSecurityAssessor, PackageSecurityConfig,
-    PostOperationVerifier, WorkspaceMonitor,
+    AdvisoryBundle, AdvisoryUpdater, BaselineStore, DriftDetector, PackageSecurityAssessor,
+    PackageSecurityConfig, PostOperationVerifier, TrustedKeyStore, WorkspaceMonitor,
 };
 pub use policy::PolicyEngine;

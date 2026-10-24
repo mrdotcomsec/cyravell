@@ -118,6 +118,33 @@ async function runTests() {
     console.log('  ✓ monitorWorkspace fails safely when disconnected');
   }
 
+  // Test 15: getAdvisoryStatus throws if engine is disconnected
+  try {
+    await client.getAdvisoryStatus();
+    assert.fail('Expected error when getting advisory status while disconnected');
+  } catch (e) {
+    assert.ok(e.message.includes('not connected'), 'Must throw not connected error');
+    console.log('  ✓ getAdvisoryStatus fails safely when disconnected');
+  }
+
+  // Test 16: inspectAdvisoryBundle throws if engine is disconnected
+  try {
+    await client.inspectAdvisoryBundle('/tmp/test-bundle.json');
+    assert.fail('Expected error when inspecting advisory bundle while disconnected');
+  } catch (e) {
+    assert.ok(e.message.includes('not connected'), 'Must throw not connected error');
+    console.log('  ✓ inspectAdvisoryBundle fails safely when disconnected');
+  }
+
+  // Test 17: importAdvisoryBundle throws if engine is disconnected
+  try {
+    await client.importAdvisoryBundle('/tmp/test-bundle.json', false);
+    assert.fail('Expected error when importing advisory bundle while disconnected');
+  } catch (e) {
+    assert.ok(e.message.includes('not connected'), 'Must throw not connected error');
+    console.log('  ✓ importAdvisoryBundle fails safely when disconnected');
+  }
+
   console.log('✓ All extension client tests passed successfully!');
 }
 

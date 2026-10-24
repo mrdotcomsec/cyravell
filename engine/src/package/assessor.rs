@@ -3,13 +3,14 @@
 
 use crate::analysis::ast::AtomicCommand;
 use crate::model::{
-    AssessmentStatus, PackageAssessmentResult, PackageAssessmentSummary, PackageSecurityFinding,
-    Severity,
+    AssessmentStatus, PackageAssessmentResult, PackageAssessmentSummary, PackageEcosystem,
+    PackageSecurityFinding, Severity,
 };
 use crate::package::advisory::AdvisoryDatabase;
 use crate::package::detector::{detect_package_command, DetectedPackageCommand};
 use crate::package::manifest::ManifestInspector;
 use std::path::Path;
+use std::sync::{Arc, RwLock, RwLockReadGuard};
 
 #[derive(Debug, Clone)]
 pub struct PackageSecurityConfig {
@@ -34,7 +35,7 @@ impl Default for PackageSecurityConfig {
 
 pub struct PackageSecurityAssessor {
     config: PackageSecurityConfig,
-    advisory_db: AdvisoryDatabase,
+    advisory_db: Arc<RwLock<AdvisoryDatabase>>,
 }
 
 impl Default for PackageSecurityAssessor {
@@ -48,21 +49,30 @@ impl PackageSecurityAssessor {
         let advisory_db = AdvisoryDatabase::load_with_fallback(config.advisory_path.as_deref());
         Self {
             config,
-            advisory_db,
+            advisory_db: Arc::new(RwLock::new(advisory_db)),
         }
     }
 
-    pub fn with_advisories(mut self, db: AdvisoryDatabase) -> Self {
-        self.advisory_db = db;
+    pub fn with_advisories(self, db: AdvisoryDatabase) -> Self {
+        *self.advisory_db.write().expect("advisory_db lock poisoned") = db;
         self
     }
 
-    pub fn advisory_db(&self) -> &AdvisoryDatabase {
-        &self.advisory_db
+    pub fn advisory_db(&self) -> RwLockReadGuard<'_, AdvisoryDatabase> {
+        self.advisory_db.read().expect("advisory_db lock poisoned")
     }
 
-    pub fn advisory_db_mut(&mut self) -> &mut AdvisoryDatabase {
-        &mut self.advisory_db
+    pub fn advisory_db_arc(&self) -> Arc<RwLock<AdvisoryDatabase>> {
+        Arc::clone(&self.advisory_db)
+    }
+
+    pub fn update_advisory_db(&self, new_db: AdvisoryDatabase) {
+        let mut lock = self.advisory_db.write().expect("advisory_db lock poisoned");
+        *lock = new_db;
+    }
+
+    pub fn is_malicious_package(&self, eco: PackageEcosystem, name: &str) -> bool {
+        self.advisory_db().is_malicious_package(eco, name)
     }
 
     pub fn config(&self) -> &PackageSecurityConfig {
@@ -166,6 +176,7 @@ impl PackageSecurityAssessor {
         };
 
         if let Some(err) = parse_failure {
+            let db = self.advisory_db();
             return PackageAssessmentResult {
                 package_manager: detected.package_manager,
                 operation: detected.operation,
@@ -179,13 +190,14 @@ impl PackageSecurityAssessor {
                 findings: Vec::new(),
                 manifest_fingerprint: None,
                 inspected_files,
-                assessment_source: self.advisory_db.source_name().to_string(),
-                offline_mode: self.advisory_db.is_offline(),
+                assessment_source: db.source_name().to_string(),
+                offline_mode: db.is_offline(),
                 notes: vec![format!("Failed to parse project manifest: {}", err)],
             };
         }
 
         let scan = scan_result.unwrap();
+        let db = self.advisory_db();
 
         // 2. Scan directly requested packages
         let mut scanned_count = 0;
@@ -197,7 +209,7 @@ impl PackageSecurityAssessor {
 
         for pkg in &detected.requested_packages {
             scanned_count += 1;
-            let matches = self.advisory_db.query(
+            let matches = db.query(
                 detected.package_manager,
                 &pkg.name,
                 pkg.version_constraint.as_deref(),
@@ -221,9 +233,7 @@ impl PackageSecurityAssessor {
         // 3. Scan resolved lockfile dependencies if present
         for dep in &scan.resolved_dependencies {
             scanned_count += 1;
-            let matches =
-                self.advisory_db
-                    .query(detected.package_manager, &dep.name, Some(&dep.version));
+            let matches = db.query(detected.package_manager, &dep.name, Some(&dep.version));
 
             for adv in matches {
                 // Avoid duplicating direct package findings
@@ -293,8 +303,8 @@ impl PackageSecurityAssessor {
             findings,
             manifest_fingerprint: scan.fingerprint,
             inspected_files,
-            assessment_source: self.advisory_db.source_name().to_string(),
-            offline_mode: self.advisory_db.is_offline(),
+            assessment_source: db.source_name().to_string(),
+            offline_mode: db.is_offline(),
             notes,
         }
     }

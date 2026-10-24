@@ -1,7 +1,8 @@
 // Copyright 2026 Cyravell Contributors
 // SPDX-License-Identifier: Apache-2.0
 
-use crate::model::{PackageEcosystem, Severity};
+use crate::model::{AdvisoryDatabaseSource, AdvisoryStatus, PackageEcosystem, Severity};
+use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use std::cmp::Ordering;
@@ -62,6 +63,11 @@ impl From<serde_json::Error> for AdvisoryError {
 pub struct AdvisoryDatabase {
     advisories: Vec<AdvisoryRecord>,
     source_name: String,
+    source_type: AdvisoryDatabaseSource,
+    database_version: String,
+    publisher: Option<String>,
+    key_id: Option<String>,
+    last_updated: Option<DateTime<Utc>>,
     is_offline: bool,
 }
 
@@ -71,6 +77,16 @@ impl Default for AdvisoryDatabase {
     }
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct PersistedAdvisoryDb {
+    pub database_version: String,
+    pub format_version: String,
+    pub publisher: Option<String>,
+    pub key_id: Option<String>,
+    pub last_updated: Option<DateTime<Utc>>,
+    pub advisories: Vec<AdvisoryRecord>,
+}
+
 impl AdvisoryDatabase {
     pub fn new() -> Self {
         Self::default()
@@ -78,10 +94,27 @@ impl AdvisoryDatabase {
 
     pub fn load_from_path(path: &Path) -> Result<Self, AdvisoryError> {
         let content = std::fs::read_to_string(path)?;
+        if let Ok(persisted) = serde_json::from_str::<PersistedAdvisoryDb>(&content) {
+            return Ok(Self {
+                advisories: persisted.advisories,
+                source_name: path.display().to_string(),
+                source_type: AdvisoryDatabaseSource::ImportedBundle,
+                database_version: persisted.database_version,
+                publisher: persisted.publisher,
+                key_id: persisted.key_id,
+                last_updated: persisted.last_updated,
+                is_offline: true,
+            });
+        }
         let advisories: Vec<AdvisoryRecord> = serde_json::from_str(&content)?;
         Ok(Self {
             advisories,
             source_name: path.display().to_string(),
+            source_type: AdvisoryDatabaseSource::LocalFile,
+            database_version: "2026.04.1".to_string(),
+            publisher: Some("Local Advisory File".to_string()),
+            key_id: None,
+            last_updated: None,
             is_offline: true,
         })
     }
@@ -93,8 +126,31 @@ impl AdvisoryDatabase {
         Self {
             advisories,
             source_name: "embedded:package_advisories.json".to_string(),
+            source_type: AdvisoryDatabaseSource::Embedded,
+            database_version: "2.7.0".to_string(),
+            publisher: Some("Cyravell Embedded Baseline".to_string()),
+            key_id: None,
+            last_updated: None,
             is_offline: true,
         }
+    }
+
+    pub fn from_bundle(bundle: &crate::package::bundle::AdvisoryBundle) -> Self {
+        Self {
+            advisories: bundle.advisories.clone(),
+            source_name: format!("imported:bundle:{}", bundle.key_id),
+            source_type: AdvisoryDatabaseSource::ImportedBundle,
+            database_version: bundle.database_version.clone(),
+            publisher: Some(bundle.publisher.clone()),
+            key_id: Some(bundle.key_id.clone()),
+            last_updated: Some(bundle.created_at),
+            is_offline: true,
+        }
+    }
+
+    pub fn load_default(data_dir: &Path) -> Self {
+        let p = data_dir.join("advisories.json");
+        Self::load_with_fallback(Some(&p))
     }
 
     pub fn load_with_fallback(path: Option<&Path>) -> Self {
@@ -106,6 +162,55 @@ impl AdvisoryDatabase {
             }
         }
         Self::load_embedded()
+    }
+
+    pub fn database_version(&self) -> &str {
+        &self.database_version
+    }
+
+    pub fn set_database_version(&mut self, version: String) {
+        self.database_version = version;
+    }
+
+    pub fn source_type(&self) -> AdvisoryDatabaseSource {
+        self.source_type
+    }
+
+    pub fn publisher(&self) -> Option<&str> {
+        self.publisher.as_deref()
+    }
+
+    pub fn key_id(&self) -> Option<&str> {
+        self.key_id.as_deref()
+    }
+
+    pub fn last_updated(&self) -> Option<DateTime<Utc>> {
+        self.last_updated
+    }
+
+    pub fn status(&self) -> AdvisoryStatus {
+        let malicious_count = self.advisories.iter().filter(|a| a.is_malicious).count();
+        let vulns_count = self.advisories.iter().filter(|a| !a.is_malicious).count();
+        let verification_status = match self.source_type {
+            AdvisoryDatabaseSource::ImportedBundle => "VERIFIED_AUTHENTIC".to_string(),
+            AdvisoryDatabaseSource::Embedded => "UNAUTHENTICATED_EMBEDDED".to_string(),
+            AdvisoryDatabaseSource::LocalFile => "UNAUTHENTICATED_LOCAL_FILE".to_string(),
+        };
+
+        AdvisoryStatus {
+            database_version: self.database_version.clone(),
+            source: self.source_type,
+            source_name: self.source_name.clone(),
+            publisher: self.publisher.clone(),
+            key_id: self.key_id.clone(),
+            fingerprint: self.fingerprint(),
+            records_count: self.advisories.len(),
+            malicious_count,
+            vulnerabilities_count: vulns_count,
+            last_updated: self.last_updated,
+            verification_status,
+            min_cyravell_version: None,
+        }
     }
 
     pub fn add_advisory(&mut self, adv: AdvisoryRecord) {
@@ -161,6 +266,14 @@ impl AdvisoryDatabase {
             return Err(format!("Missing provenance for advisory '{}'", record.id));
         }
         Ok(())
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.advisories.is_empty()
+    }
+
+    pub fn is_malicious_package(&self, eco: PackageEcosystem, name: &str) -> bool {
+        self.query(eco, name, None).iter().any(|a| a.is_malicious)
     }
 
     pub fn source_name(&self) -> &str {
@@ -284,6 +397,38 @@ pub fn version_matches_range(version_str: &str, range_str: &str) -> bool {
     }
 
     true
+}
+
+pub fn validate_version_range(range_str: &str) -> Result<(), String> {
+    let range_str = range_str.trim();
+    if range_str == "*" || range_str == "all" || range_str.is_empty() {
+        return Ok(());
+    }
+
+    let clauses: Vec<&str> = if range_str.contains(',') {
+        range_str.split(',').map(|s| s.trim()).collect()
+    } else {
+        vec![range_str]
+    };
+
+    for clause in clauses {
+        let clause = clause.trim();
+        if clause == "*" || clause == "all" {
+            continue;
+        }
+        let (_op, target_str) = extract_op_and_version(clause);
+        if target_str.is_empty() {
+            return Err(format!("Empty target version in clause '{}'", clause));
+        }
+        if SimpleVersion::parse(target_str).is_none() {
+            return Err(format!(
+                "Unparseable version '{}' in clause '{}'",
+                target_str, clause
+            ));
+        }
+    }
+
+    Ok(())
 }
 
 fn match_single_clause(ver: &SimpleVersion, clause: &str) -> bool {

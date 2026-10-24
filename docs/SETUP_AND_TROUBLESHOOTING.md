@@ -363,5 +363,90 @@ cargo run --bin cyravell-test-harness -- test-drift-monitor
 - **Notice: `Observed via local filesystem reconciliation (unattributed background change)` in Audit Logs:**
   - **Explanation:** Filesystem monitoring detects *that* a manifest or lockfile was modified, but does not fabricate false attribution to a process without an active controlled terminal context. This is expected behavior and upholds Cyravell's attribution honesty principle.
 
+---
+
+## 12. Advisory Intelligence Updates & Rollback Protection (Phase 2.7)
+
+Cyravell Phase 2.7 enables secure, offline, cryptographically verifiable updates for vulnerability and malicious package intelligence.
+
+### 12.1 Querying Advisory Database Status
+```bash
+# Query active advisory database status (works whether engine daemon is live or offline)
+cyravell-engine advisory status
+```
+Output displays:
+- Active version and format version.
+- Provenance source (`Embedded`, `LocalFile`, or `ImportedBundle`).
+- Publisher and signing key identifier.
+- Total advisories, malicious packages, and vulnerabilities.
+- Counts grouped by severity and package ecosystem.
+
+### 12.2 Inspecting and Verifying Advisory Bundles
+Before importing an advisory update, developers can safely inspect metadata, verify the cryptographic signature, and compute differences against the active database:
+
+```bash
+# Inspect bundle metadata, validity, and difference counts without applying:
+cyravell-engine advisory inspect /path/to/advisory-bundle.json
+
+# Cryptographically verify the Ed25519 signature against trusted keys:
+cyravell-engine advisory verify /path/to/advisory-bundle.json
+
+# Verify using an explicit custom keystore:
+cyravell-engine advisory verify /path/to/advisory-bundle.json --keys /path/to/custom_keys.json
+
+# Display granular line-by-line additions, modifications, and deletions:
+cyravell-engine advisory diff /path/to/advisory-bundle.json
+```
+
+### 12.3 Importing and Activating an Advisory Bundle
+```bash
+# Import and activate (online notifies running daemon over IPC; offline updates local file)
+cyravell-engine advisory import /path/to/advisory-bundle.json
+
+# Force import of an older or equal version (rollback override):
+cyravell-engine advisory import /path/to/advisory-bundle.json --allow-rollback
+```
+
+### 12.4 Using the VS Code Extension
+1. Open the Command Palette (`Ctrl+Shift+P` / `Cmd+Shift+P`).
+2. Run `Cyravell: Inspect Advisory Bundle` to select and review a candidate bundle.
+3. Run `Cyravell: Import Advisory Bundle` to validate and activate the bundle. If a rollback is detected, VS Code displays a modal confirmation prompt.
+4. Check **Advisory Intelligence** under the **Cyravell Engine Status** panel in the activity bar.
+
+### 12.5 Public Key Provisioning & Trust Store
+Trusted public signing keys are configured in `rules/trusted_keys.json`:
+```json
+{
+  "version": "1.0",
+  "keys": [
+    {
+      "key_id": "cyravell-sec-official-2026",
+      "publisher": "Cyravell Security Intelligence Team",
+      "public_key_hex": "68b910547a547804e106aa41612d1deb43f5857a1b82a9d586ac49a245699278",
+      "created_at": "2026-01-01T00:00:00Z",
+      "expires_at": null,
+      "is_active": true
+    }
+  ]
+}
+```
+- **Adding Keys:** Add entries with the publisher name and 64-character hex-encoded Ed25519 public key.
+- **Key Revocation:** Set `"is_active": false` or set `"expires_at"` to an RFC 3339 timestamp.
+
+### 12.6 Troubleshooting Advisory Update Errors
+- **Error: `Signature validation error: Key ID '...' not found in trusted key store`:**
+  - **Cause:** The candidate bundle was signed with a key identifier not present in `rules/trusted_keys.json`.
+  - **Resolution:** Verify the bundle publisher. If legitimate, add their public key to `rules/trusted_keys.json`.
+- **Error: `Rollback rejected: candidate database version ... is not strictly newer than active version ...`:**
+  - **Cause:** Cyravell's anti-rollback protection rejects candidate bundles that are older than or equal to the current active version by default.
+  - **Resolution:** If a rollback is intentional (e.g., reverting a bad upstream release), specify `--allow-rollback` via CLI or confirm the prompt in VS Code. Note that existing active hard blocks are preserved even across rollbacks.
+- **Error: `Advisory payload digest mismatch`:**
+  - **Cause:** The advisory records in the bundle do not match the signed SHA-256 `payload_digest`. The file was modified or corrupted in transit.
+  - **Resolution:** Re-download or obtain an authentic, uncorrupted bundle from the publisher.
+- **Error: `Synthetic test fixture contamination detected: record '...' has is_synthetic=true in production bundle`:**
+  - **Cause:** A development or test fixture record was accidentally included in a production bundle.
+  - **Resolution:** Re-export the bundle with `is_synthetic: false` on all production advisory entries.
+
+
 
 

@@ -17,7 +17,8 @@ use crate::integrity::{verify_manifest, IntegrityStatus};
 use crate::model::*;
 use crate::package::{
     create_workspace_baseline, detect_package_command_from_raw, summarize_assessment,
-    BaselineStore, DriftDetector, PackageSecurityAssessor, PostOperationVerifier, WorkspaceMonitor,
+    AdvisoryUpdater, BaselineStore, DriftDetector, PackageSecurityAssessor, PostOperationVerifier,
+    TrustedKeyStore, WorkspaceMonitor,
 };
 use crate::policy::PolicyEngine;
 
@@ -26,12 +27,14 @@ pub struct EngineState {
     pub events_processed: AtomicU64,
     pub recent_events: Mutex<VecDeque<EvaluatedEventRecord>>,
     pub policy: PolicyEngine,
-    pub audit: AuditLog,
+    pub audit: Arc<AuditLog>,
     pub approval_manager: Arc<ApprovalManager>,
     pub package_assessor: Arc<PackageSecurityAssessor>,
     pub backend: Arc<dyn ExecutionBackend>,
     pub baseline_store: Arc<BaselineStore>,
     pub workspace_monitor: Arc<WorkspaceMonitor>,
+    pub advisory_updater: Arc<AdvisoryUpdater>,
+    pub trusted_keys: Arc<TrustedKeyStore>,
     pub manifest_path: Option<PathBuf>,
     pub base_dir: PathBuf,
     pub shutdown_requested: AtomicBool,
@@ -71,7 +74,19 @@ impl IpcServer {
         let data_dir = data_dir.as_ref().to_path_buf();
 
         let audit_path = data_dir.join("audit.log");
-        let audit = AuditLog::open(&audit_path)?;
+        let audit = Arc::new(AuditLog::open(&audit_path)?);
+
+        let package_assessor = Arc::new(PackageSecurityAssessor::default());
+        let baseline_store = Arc::new(BaselineStore::default());
+        let trusted_keys = Arc::new(TrustedKeyStore::load_default());
+        let advisory_store_path = data_dir.join("advisories.json");
+        let advisory_updater = Arc::new(AdvisoryUpdater::new(
+            Arc::clone(&package_assessor),
+            Arc::clone(&baseline_store),
+            Arc::clone(&audit),
+            Arc::clone(&trusted_keys),
+            advisory_store_path,
+        ));
 
         let state = Arc::new(EngineState {
             start_time: Instant::now(),
@@ -80,10 +95,12 @@ impl IpcServer {
             policy: PolicyEngine::new(),
             audit,
             approval_manager,
-            package_assessor: Arc::new(PackageSecurityAssessor::default()),
+            package_assessor,
             backend,
-            baseline_store: Arc::new(BaselineStore::default()),
+            baseline_store,
             workspace_monitor: Arc::new(WorkspaceMonitor::default()),
+            advisory_updater,
+            trusted_keys,
             manifest_path,
             base_dir,
             shutdown_requested: AtomicBool::new(false),
@@ -240,6 +257,7 @@ fn dispatch_request(req: JsonRpcRequest, state: &Arc<EngineState>) -> JsonRpcRes
                     "execution_gate".to_string(),
                     "dependency_baselining".to_string(),
                     "drift_monitoring".to_string(),
+                    "advisory_updates".to_string(),
                 ],
             };
             JsonRpcResponse::success(id, serde_json::to_value(res).unwrap())
@@ -1035,7 +1053,7 @@ fn dispatch_request(req: JsonRpcRequest, state: &Arc<EngineState>) -> JsonRpcRes
                                 &record_params.command,
                                 record_params.exit_code,
                                 pre_baseline.as_ref(),
-                                state.package_assessor.advisory_db(),
+                                &state.package_assessor.advisory_db(),
                             );
                             if let Some(ref drift) = post_res.drift_report {
                                 state
@@ -1365,7 +1383,7 @@ fn dispatch_request(req: JsonRpcRequest, state: &Arc<EngineState>) -> JsonRpcRes
                         &dispatch_params.command,
                         exit_code,
                         pre_baseline.as_ref(),
-                        state.package_assessor.advisory_db(),
+                        &state.package_assessor.advisory_db(),
                     );
                     if let Some(ref drift) = post_res.drift_report {
                         state
@@ -1591,7 +1609,7 @@ fn dispatch_request(req: JsonRpcRequest, state: &Arc<EngineState>) -> JsonRpcRes
                 create_params.ecosystem,
                 reason,
                 trust,
-                state.package_assessor.advisory_db(),
+                &state.package_assessor.advisory_db(),
             ) {
                 Ok(baseline) => {
                     state.baseline_store.set_baseline(path, baseline.clone());
@@ -1688,7 +1706,7 @@ fn dispatch_request(req: JsonRpcRequest, state: &Arc<EngineState>) -> JsonRpcRes
                 match state.workspace_monitor.reconcile_workspace(
                     path,
                     &state.baseline_store,
-                    state.package_assessor.advisory_db(),
+                    &state.package_assessor.advisory_db(),
                     Some(&state.audit),
                 ) {
                     Ok(Some(report)) => {
@@ -1749,13 +1767,13 @@ fn dispatch_request(req: JsonRpcRequest, state: &Arc<EngineState>) -> JsonRpcRes
                     Some(trusted.ecosystem),
                     SnapshotReason::ManualInspection,
                     BaselineTrust::PostOperationObserved,
-                    state.package_assessor.advisory_db(),
+                    &state.package_assessor.advisory_db(),
                 ) {
                     Ok(current) => {
                         let report = DriftDetector::detect(
                             &trusted,
                             &current,
-                            state.package_assessor.advisory_db(),
+                            &state.package_assessor.advisory_db(),
                         );
                         state.baseline_store.set_drift_report(path, report.clone());
                         let res = PackageDetectDriftResult {
@@ -1813,7 +1831,7 @@ fn dispatch_request(req: JsonRpcRequest, state: &Arc<EngineState>) -> JsonRpcRes
                 &v_params.command,
                 Some(v_params.exit_code),
                 pre_baseline.as_ref(),
-                state.package_assessor.advisory_db(),
+                &state.package_assessor.advisory_db(),
             );
 
             if let Some(ref drift) = verify_res.drift_report {
@@ -1889,7 +1907,7 @@ fn dispatch_request(req: JsonRpcRequest, state: &Arc<EngineState>) -> JsonRpcRes
                         None,
                         SnapshotReason::InitialBaseline,
                         BaselineTrust::UnverifiedInitial,
-                        state.package_assessor.advisory_db(),
+                        &state.package_assessor.advisory_db(),
                     ) {
                         state.baseline_store.set_baseline(path, initial);
                     }
@@ -1910,6 +1928,90 @@ fn dispatch_request(req: JsonRpcRequest, state: &Arc<EngineState>) -> JsonRpcRes
                     message: "Workspace unregistered from monitoring".to_string(),
                 };
                 JsonRpcResponse::success(id, serde_json::to_value(res).unwrap())
+            }
+        }
+
+        "package.get_advisory_status" => {
+            let status = state.package_assessor.advisory_db().status();
+            let res = PackageGetAdvisoryStatusResult { status };
+            JsonRpcResponse::success(id, serde_json::to_value(res).unwrap())
+        }
+
+        "package.inspect_advisory_bundle" => {
+            let params = match req.params {
+                Some(p) => p,
+                None => {
+                    return JsonRpcResponse::error(
+                        id,
+                        -32602,
+                        "Missing params for package.inspect_advisory_bundle".to_string(),
+                        None,
+                    )
+                }
+            };
+
+            let p: PackageInspectAdvisoryBundleParams = match serde_json::from_value(params) {
+                Ok(parsed) => parsed,
+                Err(e) => {
+                    return JsonRpcResponse::error(
+                        id,
+                        -32602,
+                        "Invalid params format for package.inspect_advisory_bundle".to_string(),
+                        Some(e.to_string()),
+                    )
+                }
+            };
+
+            let path = Path::new(&p.bundle_path);
+            match state.advisory_updater.inspect_bundle(path) {
+                Ok(inspect_res) => {
+                    JsonRpcResponse::success(id, serde_json::to_value(inspect_res).unwrap())
+                }
+                Err(e) => JsonRpcResponse::error(
+                    id,
+                    -32007,
+                    format!("Failed to inspect advisory bundle: {}", e),
+                    None,
+                ),
+            }
+        }
+
+        "package.import_advisory_bundle" => {
+            let params = match req.params {
+                Some(p) => p,
+                None => {
+                    return JsonRpcResponse::error(
+                        id,
+                        -32602,
+                        "Missing params for package.import_advisory_bundle".to_string(),
+                        None,
+                    )
+                }
+            };
+
+            let p: PackageImportAdvisoryBundleParams = match serde_json::from_value(params) {
+                Ok(parsed) => parsed,
+                Err(e) => {
+                    return JsonRpcResponse::error(
+                        id,
+                        -32602,
+                        "Invalid params format for package.import_advisory_bundle".to_string(),
+                        Some(e.to_string()),
+                    )
+                }
+            };
+
+            let path = Path::new(&p.bundle_path);
+            match state.advisory_updater.import_bundle(path, p.allow_rollback) {
+                Ok(import_res) => {
+                    JsonRpcResponse::success(id, serde_json::to_value(import_res).unwrap())
+                }
+                Err(e) => JsonRpcResponse::error(
+                    id,
+                    -32007,
+                    format!("Failed to import advisory bundle: {}", e),
+                    None,
+                ),
             }
         }
 

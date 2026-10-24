@@ -749,7 +749,7 @@ impl ExecutionGate {
                                     command,
                                     Some(exit_code),
                                     pre_baseline.as_ref(),
-                                    self.package_assessor.advisory_db(),
+                                    &self.package_assessor.advisory_db(),
                                 );
                                 if let Some(ref drift) = post_res.drift_report {
                                     self.baseline_store.set_drift_report(dir, drift.clone());
@@ -1051,7 +1051,7 @@ impl ExecutionGate {
                     &params.command,
                     exit_code,
                     pre_baseline.as_ref(),
-                    self.package_assessor.advisory_db(),
+                    &self.package_assessor.advisory_db(),
                 );
                 if let Some(ref drift) = post_res.drift_report {
                     self.baseline_store.set_drift_report(dir, drift.clone());

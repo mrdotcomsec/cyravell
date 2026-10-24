@@ -86,6 +86,16 @@
         "command": "cyravell.reconcileDrift",
         "title": "Cyravell: Check Dependency Drift",
         "icon": "$(history)"
+      },
+      {
+        "command": "cyravell.inspectAdvisories",
+        "title": "Cyravell: Inspect Advisory Bundle",
+        "icon": "$(search)"
+      },
+      {
+        "command": "cyravell.importAdvisories",
+        "title": "Cyravell: Import Advisory Bundle",
+        "icon": "$(cloud-download)"
       }
     ],
     "menus": {
