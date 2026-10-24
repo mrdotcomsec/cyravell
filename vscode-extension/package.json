@@ -70,10 +70,20 @@
         "command": "cyravell.openControlledTerminal",
         "title": "Cyravell: Open Protected Controlled Terminal",
         "icon": "$(terminal)"
+      },
+      {
+        "command": "cyravell.reviewApprovals",
+        "title": "Cyravell: Review Pending Command Approvals",
+        "icon": "$(checklist)"
       }
     ],
     "menus": {
       "view/title": [
+        {
+          "command": "cyravell.reviewApprovals",
+          "when": "view == cyravell.statusView",
+          "group": "navigation"
+        },
         {
           "command": "cyravell.openControlledTerminal",
           "when": "view == cyravell.statusView",

@@ -11,16 +11,30 @@ use crate::model::ExecutionOutcome;
 pub struct ControlledShell {
     gate: Arc<ExecutionGate>,
     working_dir: std::sync::Mutex<PathBuf>,
+    session_id: String,
 }
 
 impl ControlledShell {
     pub fn new(gate: Arc<ExecutionGate>, initial_dir: Option<PathBuf>) -> Self {
+        Self::with_session(gate, initial_dir, format!("shell-{}", uuid::Uuid::new_v4()))
+    }
+
+    pub fn with_session(
+        gate: Arc<ExecutionGate>,
+        initial_dir: Option<PathBuf>,
+        session_id: String,
+    ) -> Self {
         let dir = initial_dir
             .unwrap_or_else(|| std::env::current_dir().unwrap_or_else(|_| PathBuf::from(".")));
         Self {
             gate,
             working_dir: std::sync::Mutex::new(dir),
+            session_id,
         }
+    }
+
+    pub fn session_id(&self) -> &str {
+        &self.session_id
     }
 
     pub fn current_working_dir(&self) -> PathBuf {
@@ -35,7 +49,9 @@ impl ControlledShell {
     /// Returns the command's exit code, or 126 if prevented/withheld.
     pub fn run_command(&self, command: &str) -> i32 {
         let dir = self.current_working_dir();
-        let result = self.gate.execute_gated(command, Some(&dir));
+        let result =
+            self.gate
+                .execute_gated_with_session(command, Some(&self.session_id), Some(&dir));
         self.print_gate_notice(&result, command);
         result.exit_code.unwrap_or(126)
     }
@@ -86,7 +102,11 @@ impl ControlledShell {
             }
 
             // Dispatch command through the Execution Gate
-            let result = self.gate.execute_gated(trimmed, Some(&current_dir));
+            let result = self.gate.execute_gated_with_session(
+                trimmed,
+                Some(&self.session_id),
+                Some(&current_dir),
+            );
             self.print_gate_notice(&result, trimmed);
         }
 
@@ -143,11 +163,35 @@ impl ControlledShell {
                 eprintln!("  Command: {}", command);
                 eprintln!("  Reason:  {}", result.reason);
                 eprintln!("  Rules:   {:?}", result.matched_rules);
-                eprintln!("  Action:  WITHHELD (Interactive approval workflow is Phase 2.3)");
-                eprintln!("  Status:  Execution prevented until explicit approval capability");
+                eprintln!("  Action:  WITHHELD (Pending interactive user approval)");
+                eprintln!("  Status:  Execution prevented until explicit approval granted");
                 if let Some(ref impact) = result.potential_impact {
                     eprintln!("  Impact:  {}", impact);
                 }
+                eprintln!();
+            }
+            ExecutionOutcome::DeniedByUser => {
+                eprintln!("\n┌─────────────────────────────────────────────────────────────┐");
+                eprintln!("│ [CYRAVELL EXECUTION GATE] APPROVAL DENIED BY USER           │");
+                eprintln!("└─────────────────────────────────────────────────────────────┘");
+                eprintln!("  Command: {}", command);
+                eprintln!("  Action:  DISPATCH PREVENTED (User denied approval)");
+                eprintln!();
+            }
+            ExecutionOutcome::CancelledByUser => {
+                eprintln!("\n┌─────────────────────────────────────────────────────────────┐");
+                eprintln!("│ [CYRAVELL EXECUTION GATE] APPROVAL CANCELLED BY USER        │");
+                eprintln!("└─────────────────────────────────────────────────────────────┘");
+                eprintln!("  Command: {}", command);
+                eprintln!("  Action:  DISPATCH PREVENTED (Approval was cancelled)");
+                eprintln!();
+            }
+            ExecutionOutcome::ExpiredApproval => {
+                eprintln!("\n┌─────────────────────────────────────────────────────────────┐");
+                eprintln!("│ [CYRAVELL EXECUTION GATE] APPROVAL EXPIRED                  │");
+                eprintln!("└─────────────────────────────────────────────────────────────┘");
+                eprintln!("  Command: {}", command);
+                eprintln!("  Action:  DISPATCH PREVENTED (Approval request timed out)");
                 eprintln!();
             }
             ExecutionOutcome::FailedClosed => {

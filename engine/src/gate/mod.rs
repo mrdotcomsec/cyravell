@@ -1,21 +1,29 @@
 // Copyright 2026 Cyravell Contributors
 // SPDX-License-Identifier: Apache-2.0
 
+pub mod approval;
 pub mod backend;
 pub mod client;
 pub mod shell;
 
+#[cfg(test)]
+pub mod adversarial;
+
 use std::path::Path;
 use std::sync::Arc;
 
-pub use backend::{ExecutionBackend, ExecutionError, MockExecutionBackend, OsExecutionBackend};
+pub use approval::{ApprovalError, ApprovalManager};
+pub use backend::{
+    ExecutionBackend, ExecutionError, MockExecutionBackend, MockInvocation, OsExecutionBackend,
+};
 pub use client::GateEngineClient;
 pub use shell::ControlledShell;
 
 use crate::audit::AuditLog;
 use crate::model::{
-    AnalysisCompleteness, Confidence, ExecutionOutcome, GateDecision, GateEvaluateResult,
-    GateRecordOutcomeParams, RiskAssessment, Severity,
+    AnalysisCompleteness, Confidence, ExecutionOutcome, GateDecision, GateDispatchAuthorizedParams,
+    GateDispatchAuthorizedResult, GateEvaluateResult, GateRecordOutcomeParams, RiskAssessment,
+    Severity,
 };
 use crate::policy::PolicyEngine;
 
@@ -38,6 +46,7 @@ pub struct ExecutionGate {
     ipc_client: Option<Arc<GateEngineClient>>,
     in_process_policy: Option<PolicyEngine>,
     in_process_audit: Option<Arc<AuditLog>>,
+    approval_manager: Arc<ApprovalManager>,
     fail_closed: bool,
 }
 
@@ -59,18 +68,52 @@ impl ExecutionGate {
         in_process_audit: Option<Arc<AuditLog>>,
         fail_closed: bool,
     ) -> Self {
+        Self::with_approval_manager(
+            backend,
+            ipc_client,
+            in_process_policy,
+            in_process_audit,
+            Arc::new(ApprovalManager::default()),
+            fail_closed,
+        )
+    }
+
+    pub fn with_approval_manager(
+        backend: Arc<dyn ExecutionBackend>,
+        ipc_client: Option<Arc<GateEngineClient>>,
+        in_process_policy: Option<PolicyEngine>,
+        in_process_audit: Option<Arc<AuditLog>>,
+        approval_manager: Arc<ApprovalManager>,
+        fail_closed: bool,
+    ) -> Self {
         Self {
             backend,
             ipc_client,
             in_process_policy,
             in_process_audit,
+            approval_manager,
             fail_closed,
         }
     }
 
+    pub fn approval_manager(&self) -> &Arc<ApprovalManager> {
+        &self.approval_manager
+    }
+
     /// Evaluates a command string without executing it.
-    /// Produces a GateDecision and anticipated outcome based on policy.
     pub fn evaluate(&self, command: &str, working_dir: Option<&Path>) -> GateEvaluateResult {
+        self.evaluate_with_session(command, None, working_dir)
+    }
+
+    /// Evaluates a command string with a session identifier.
+    pub fn evaluate_with_session(
+        &self,
+        command: &str,
+        session_id: Option<&str>,
+        working_dir: Option<&Path>,
+    ) -> GateEvaluateResult {
+        let sid = session_id.map(|s| s.to_string());
+
         // Step 1: Input Validation Boundary
         if command.trim().is_empty() {
             return GateEvaluateResult {
@@ -90,6 +133,8 @@ impl ExecutionGate {
                     analysis_details: None,
                 },
                 analysis_completeness: AnalysisCompleteness::Complete,
+                request_id: None,
+                session_id: sid,
                 audit_sequence: None,
                 audit_record_hash: None,
                 reason: "Empty command string".to_string(),
@@ -117,6 +162,8 @@ impl ExecutionGate {
                     analysis_details: None,
                 },
                 analysis_completeness: AnalysisCompleteness::Complete,
+                request_id: None,
+                session_id: sid,
                 audit_sequence: None,
                 audit_record_hash: None,
                 reason: "Command contains illegal null bytes".to_string(),
@@ -144,6 +191,8 @@ impl ExecutionGate {
                     analysis_details: None,
                 },
                 analysis_completeness: AnalysisCompleteness::Partial,
+                request_id: None,
+                session_id: sid,
                 audit_sequence: None,
                 audit_record_hash: None,
                 reason: "Command exceeds 64KB size limit".to_string(),
@@ -156,7 +205,7 @@ impl ExecutionGate {
 
         // Try IPC client first if configured
         if let Some(ref client) = self.ipc_client {
-            match client.evaluate(command, dir_str.as_deref(), self.fail_closed) {
+            match client.evaluate(command, session_id, dir_str.as_deref(), self.fail_closed) {
                 Ok(eval_result) => return eval_result,
                 Err(e) => {
                     if self.fail_closed {
@@ -172,11 +221,16 @@ impl ExecutionGate {
                                 recommended_action: "BLOCK_AND_ALERT".to_string(),
                                 evaluated_at: chrono::Utc::now(),
                                 matched_rules: vec!["RULE-FAIL-CLOSED".to_string()],
-                                potential_impact: Some("Uninspected command prevented under fail-closed security policy".to_string()),
+                                potential_impact: Some(
+                                    "Uninspected command prevented under fail-closed security policy"
+                                        .to_string(),
+                                ),
                                 analysis_completeness: AnalysisCompleteness::Inconclusive,
                                 analysis_details: None,
                             },
                             analysis_completeness: AnalysisCompleteness::Inconclusive,
+                            request_id: None,
+                            session_id: sid,
                             audit_sequence: None,
                             audit_record_hash: None,
                             reason: format!("IPC evaluation failed; fail-closed active: {}", e),
@@ -209,11 +263,30 @@ impl ExecutionGate {
                 ),
             };
 
+            let req_id = if decision == GateDecision::RequireApproval {
+                let s_id = session_id.unwrap_or("default-session").to_string();
+                let appr_req = self.approval_manager.create_request(
+                    s_id,
+                    command.to_string(),
+                    dir_str.clone(),
+                    assessment.rule_id.clone(),
+                    assessment.severity,
+                    assessment.reason.clone(),
+                    None,
+                );
+
+                Some(appr_req.request_id)
+            } else {
+                None
+            };
+
             return GateEvaluateResult {
                 decision,
                 outcome,
                 risk_assessment: assessment.clone(),
                 analysis_completeness: assessment.analysis_completeness,
+                request_id: req_id,
+                session_id: sid,
                 audit_sequence: None,
                 audit_record_hash: None,
                 reason: assessment.reason.clone(),
@@ -243,6 +316,8 @@ impl ExecutionGate {
                 analysis_details: None,
             },
             analysis_completeness: AnalysisCompleteness::Inconclusive,
+            request_id: None,
+            session_id: sid,
             audit_sequence: None,
             audit_record_hash: None,
             reason: "No policy engine configured; fail-closed active".to_string(),
@@ -251,9 +326,18 @@ impl ExecutionGate {
     }
 
     /// Primary execution gate: evaluates policy and dispatches ONLY if authorized.
-    /// Guarantees that blocked or pending commands never reach the execution backend.
     pub fn execute_gated(&self, command: &str, working_dir: Option<&Path>) -> GateResult {
-        let eval = self.evaluate(command, working_dir);
+        self.execute_gated_with_session(command, None, working_dir)
+    }
+
+    /// Primary execution gate with session identifier.
+    pub fn execute_gated_with_session(
+        &self,
+        command: &str,
+        session_id: Option<&str>,
+        working_dir: Option<&Path>,
+    ) -> GateResult {
+        let eval = self.evaluate_with_session(command, session_id, working_dir);
 
         // Enforce execution gate authorization
         match eval.decision {
@@ -312,7 +396,7 @@ impl ExecutionGate {
             }
 
             GateDecision::RequireApproval => {
-                // GATED: Phase 2.2 holds pending approval commands without dispatching.
+                // GATED: Holds pending approval commands without dispatching.
                 // The execution backend is NEVER called!
                 let audit_seq = self.record_outcome(RecordOutcomeContext {
                     command,
@@ -320,10 +404,10 @@ impl ExecutionGate {
                     outcome: ExecutionOutcome::PendingApproval,
                     exit_code: None,
                     working_dir,
-                    error_msg: Some(
-                        "Execution withheld pending interactive user approval (Phase 2.3)"
-                            .to_string(),
-                    ),
+                    error_msg: Some(format!(
+                        "Execution withheld pending user approval (request_id: {:?})",
+                        eval.request_id
+                    )),
                     severity: eval.risk_assessment.severity,
                 });
 
@@ -397,6 +481,147 @@ impl ExecutionGate {
                 }
             }
         }
+    }
+
+    /// Dispatches an approved command after validating the authorization token.
+    /// Strictly guarantees single-use token consumption, command & session binding,
+    /// and policy re-evaluation before execution.
+    pub fn dispatch_authorized(
+        &self,
+        params: GateDispatchAuthorizedParams,
+    ) -> Result<GateDispatchAuthorizedResult, ApprovalError> {
+        // Step 1: Input and boundary validation
+        if params.command.trim().is_empty() {
+            return Err(ApprovalError::InvalidStateTransition(
+                "Command cannot be empty".to_string(),
+            ));
+        }
+        if params.command.contains('\0') {
+            return Err(ApprovalError::InvalidStateTransition(
+                "Command cannot contain null bytes".to_string(),
+            ));
+        }
+        if params.command.len() > 65536 {
+            return Err(ApprovalError::InvalidStateTransition(
+                "Command exceeds 64KB limit".to_string(),
+            ));
+        }
+        if params.request_id.contains('\0')
+            || params.session_id.contains('\0')
+            || params.authorization_token.contains('\0')
+        {
+            return Err(ApprovalError::InvalidStateTransition(
+                "Identifiers cannot contain null bytes".to_string(),
+            ));
+        }
+
+        // Step 2: Validate and atomically consume authorization token
+        let approved_req = match self.approval_manager.consume_authorization(
+            &params.request_id,
+            &params.session_id,
+            &params.command,
+            &params.authorization_token,
+        ) {
+            Ok(req) => req,
+            Err(e) => {
+                let sanitized = crate::analysis::redact_command(&params.command);
+                let _ = self.record_audit_raw(
+                    &format!("gate-unauth-{}", uuid::Uuid::new_v4()),
+                    "GATE_UNAUTHORIZED_DISPATCH_ATTEMPT",
+                    &format!(
+                        "Request: {}, Error: {}, Command: {}",
+                        params.request_id, e, sanitized
+                    ),
+                    Severity::High,
+                );
+                return Err(e);
+            }
+        };
+
+        // Step 3: Hard-Block Re-evaluation Guard
+        let working_path = params.working_directory.as_deref().map(Path::new);
+        let eval =
+            self.evaluate_with_session(&params.command, Some(&params.session_id), working_path);
+        if eval.decision == GateDecision::Block {
+            let sanitized = crate::analysis::redact_command(&params.command);
+            let _ = self.record_audit_raw(
+                &format!("gate-hardblock-{}", uuid::Uuid::new_v4()),
+                "GATE_HARD_BLOCK_ENFORCED_AFTER_APPROVAL",
+                &format!(
+                    "Request: {}, Command: {}, Reason: Hard-block policy cannot be bypassed",
+                    params.request_id, sanitized
+                ),
+                Severity::Critical,
+            );
+            return Err(ApprovalError::HardBlockPolicyViolation);
+        }
+
+        // Step 4: Dispatch to backend
+        let (dispatched, exit_code, outcome, error_msg) =
+            match self.backend.execute(&params.command, working_path) {
+                Ok(code) => (true, Some(code), ExecutionOutcome::Dispatched, None),
+                Err(e) => (
+                    false,
+                    Some(127),
+                    ExecutionOutcome::ExecutionFailed,
+                    Some(e.to_string()),
+                ),
+            };
+
+        // Step 5: Record outcome in cryptographic audit log
+        let sanitized = crate::analysis::redact_command(&params.command);
+        let action = if dispatched {
+            "GATE_DISPATCHED_AFTER_APPROVAL"
+        } else {
+            "GATE_DISPATCH_FAILED_AFTER_APPROVAL"
+        };
+        let detail = format!(
+            "Request: {}, Session: {}, ExitCode: {:?}, Detail: {}",
+            params.request_id,
+            params.session_id,
+            exit_code,
+            error_msg.as_deref().unwrap_or("none")
+        );
+        let audit_rec = self.record_audit_raw(
+            &format!("gate-auth-{}", uuid::Uuid::new_v4()),
+            action,
+            &format!("Command: {}, {}", sanitized, detail),
+            approved_req.severity,
+        );
+
+        let (seq, hash) = match audit_rec {
+            Some((s, h)) => (s, h),
+            None => (0, "UNRECORDED".to_string()),
+        };
+
+        Ok(GateDispatchAuthorizedResult {
+            request_id: params.request_id,
+            dispatched,
+            exit_code,
+            outcome,
+            audit_sequence: seq,
+            audit_record_hash: hash,
+            message: if dispatched {
+                "Command dispatched after verified authorization".to_string()
+            } else {
+                format!("Dispatch failed: {}", error_msg.unwrap_or_default())
+            },
+        })
+    }
+
+    fn record_audit_raw(
+        &self,
+        event_id: &str,
+        action: &str,
+        rationale: &str,
+        severity: Severity,
+    ) -> Option<(u64, String)> {
+        if let Some(ref audit) = self.in_process_audit {
+            if let Ok(rec) = audit.append(event_id, action, rationale, severity) {
+                return Some((rec.sequence_number, rec.current_record_hash));
+            }
+        }
+        None
     }
 
     fn record_outcome(&self, ctx: RecordOutcomeContext) -> Option<u64> {

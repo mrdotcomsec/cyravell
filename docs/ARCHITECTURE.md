@@ -215,5 +215,48 @@ Captured Command String
 - **Controlled Shell Scope:** Protection is guaranteed only within sessions launched via `cyravell-engine shell` or the VS Code `Cyravell Protected Terminal` profile.
 - **Ordinary Terminals Unprotected:** Standard VS Code integrated terminals running directly in bash/zsh bypass the pre-execution gate. This is explicitly reported in the extension status tree view.
 - **Child Subprocesses of Permitted Commands:** If a permitted command (e.g. `python script.py`) spawns subprocesses internally via OS syscalls, those internal subprocesses do not pass through the shell wrapper gate.
-- **Approval Workflow Deferred:** In Phase 2.2, commands requiring approval (`ALERT_AND_CONFIRM`) are held undispatched with outcome `PENDING_APPROVAL`. Interactive user approval dialogs are implemented in Phase 2.3.
+- **Approval Workflow:** Interactive user approval and single-use cryptographic authorization are fully realized and hardened in Phase 2.4.
+
+---
+
+## 8. Execution-Gate Hardening and Adversarial Validation (Phase 2.4)
+
+### 8.1 Hardened Approval State Machine
+Phase 2.4 introduces an in-memory, race-safe `ApprovalManager` (`engine/src/gate/approval.rs`) that manages pending approvals, enforces strict state transitions, and issues cryptographically unpredictable authorization tokens:
+- **Approval Status Lifecycle:**
+  `Pending -> Approved | Denied | Cancelled | Expired -> Consumed`
+- **State Invariants:**
+  - Once decided (`Approved`, `Denied`, `Cancelled`), a request cannot be re-decided or flipped. Duplicate decision requests return `ApprovalError::InvalidStateTransition`.
+  - A request that exceeds its TTL transitions to `Expired` and can no longer be decided or dispatched.
+  - Hard-blocked commands (`Severity::Critical`, `RULE-TERM-001`) cannot be approved. Attempting to approve a hard-block returns `ApprovalError::HardBlockPolicyViolation`.
+
+### 8.2 Single-Use Cryptographic Authorization Tokens
+- When an approval request is approved, the engine issues a unique, high-entropy cryptographic token (`cyr-auth-<uuid>-<uuid>`).
+- **Token Invariants:**
+  1. **Strictly Single-Use:** The token is consumed atomically *before* the backend `execute()` call. Replaying the token returns `ApprovalError::AlreadyConsumed`.
+  2. **Session Binding:** Tokens are bound to the specific `session_id` that initiated the request. Presenting a token from another session fails with `ApprovalError::SessionMismatch`.
+  3. **Exact Command Binding:** Tokens are bound character-for-character to the approved command string. Modifying, prepending, or appending commands (TOCTOU attacks) fails with `ApprovalError::CommandMismatch`.
+  4. **Bounded Window:** Tokens expire alongside the underlying approval request. Presenting an expired token fails with `ApprovalError::Expired`.
+  5. **Ephemeral Storage:** Tokens are stored exclusively in engine daemon memory; restarting the engine invalidates all prior tokens.
+
+### 8.3 Hard-Block Policy Re-evaluation Guard
+Even if an attacker bypasses user interaction, steals a token, or manipulates IPC state:
+At the moment of `gate.dispatch_authorized`, the engine independently re-analyzes the command string against current security policy. If policy classifies the command as `BLOCK_AND_ALERT` (hard block), dispatch is immediately rejected (`ApprovalError::HardBlockPolicyViolation`), the incident is recorded in the cryptographic audit log (`GATE_HARD_BLOCK_ENFORCED_AFTER_APPROVAL`), and the backend is never called.
+
+### 8.4 Authoritative Verification Framework
+- `MockExecutionBackend` provides strict assertion helpers:
+  - `assert_zero_invocations()`: Mathematically verifies backend was never called.
+  - `assert_invoked_exactly(n)`: Verifies exact execution count.
+  - `assert_command_executed(cmd)` and `assert_command_never_executed(cmd)`.
+- Adversarial Security Test Suite (`engine/src/gate/adversarial.rs`):
+  - **Category A (Approval Bypass):** Direct execution bypass, missing token, fabricated token, expired token, session tampering, command tampering (TOCTOU), hard-block override.
+  - **Category B (Replay & Deduplication):** Token reuse replay, duplicate decision, serial dispatch deduplication.
+  - **Category C (Race Conditions & Concurrency):** Approve vs Deny race, Approve vs Cancel race, concurrent dispatches using `std::sync::Barrier` (8 threads racing for 1 token: exactly 1 dispatches, 7 fail with `AlreadyConsumed`, backend invoked exactly once).
+  - **Category D (Failure & Recovery):** Engine restart token invalidation, backend spawn failure handling (token consumed to prevent retries, audit recorded), fail-closed offline enforcement.
+  - **Category E (Input & Boundary Validation):** Null bytes in commands/IDs rejected, oversized commands (>64KB) rejected, empty commands rejected.
+
+### 8.5 Scope & Non-Claims
+- **Controlled Terminal Boundary:** Execution gate guarantees apply strictly to commands submitted through the Cyravell controlled terminal (`cyravell-engine shell`, `exec`, or VS Code Protected Terminal).
+- **In-Memory Token Lifetime:** Authorization tokens do not survive engine restarts.
+- **Root-Level Compromise:** If an attacker obtains root access on the host, they can kill the engine daemon or modify memory; Cyravell operates under the standard Unix unprivileged developer security model.
 

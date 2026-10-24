@@ -36,13 +36,55 @@ export interface CommandAnalysisDetails {
 
 export interface GateEvaluateResult {
   decision: 'ALLOW' | 'REQUIRE_APPROVAL' | 'BLOCK' | 'ANALYSIS_FAILED';
-  outcome: 'DISPATCHED' | 'BLOCKED_BY_POLICY' | 'PENDING_APPROVAL' | 'FAILED_CLOSED' | 'EXECUTION_FAILED';
+  outcome:
+    | 'DISPATCHED'
+    | 'BLOCKED_BY_POLICY'
+    | 'PENDING_APPROVAL'
+    | 'FAILED_CLOSED'
+    | 'EXECUTION_FAILED'
+    | 'DENIED_BY_USER'
+    | 'CANCELLED_BY_USER'
+    | 'EXPIRED_APPROVAL';
   risk_assessment: any;
   analysis_completeness: string;
+  request_id?: string;
+  session_id?: string;
   audit_sequence?: number;
   audit_record_hash?: string;
   reason: string;
   allow_dispatch: boolean;
+}
+
+export interface ApprovalRequestItem {
+  request_id: string;
+  session_id: string;
+  command: string;
+  working_directory?: string;
+  rule_id: string;
+  severity: string;
+  reason: string;
+  created_at: string;
+  expires_at: string;
+  status: string;
+  decision_reason?: string;
+}
+
+export interface ApprovalDecideResult {
+  request_id: string;
+  status: string;
+  authorization_token?: string;
+  message: string;
+  audit_sequence?: number;
+}
+
+export interface GateDispatchAuthorizedResult {
+  request_id: string;
+  dispatched: boolean;
+  exit_code?: number;
+  outcome: string;
+  audit_sequence: number;
+  audit_record_hash: string;
+  message: string;
 }
 
 export interface SecurityEventItem {
@@ -290,6 +332,48 @@ export class EngineClient extends EventEmitter {
       command,
       working_directory: workingDirectory,
       fail_closed: failClosed,
+    });
+  }
+
+  public async getPendingApprovals(sessionId?: string): Promise<ApprovalRequestItem[]> {
+    if (this.state !== 'CONNECTED') {
+      throw new Error('Engine is not connected');
+    }
+    const res = await this.call('approval.get_pending', { session_id: sessionId });
+    return res && res.pending_requests ? res.pending_requests : [];
+  }
+
+  public async decideApproval(
+    requestId: string,
+    decision: 'Approve' | 'Deny' | 'Cancel',
+    reason?: string
+  ): Promise<ApprovalDecideResult> {
+    if (this.state !== 'CONNECTED') {
+      throw new Error('Engine is not connected');
+    }
+    return this.call('approval.decide', {
+      request_id: requestId,
+      decision,
+      reason,
+    });
+  }
+
+  public async dispatchAuthorized(
+    requestId: string,
+    sessionId: string,
+    command: string,
+    authorizationToken: string,
+    workingDirectory?: string
+  ): Promise<GateDispatchAuthorizedResult> {
+    if (this.state !== 'CONNECTED') {
+      throw new Error('Engine is not connected');
+    }
+    return this.call('gate.dispatch_authorized', {
+      request_id: requestId,
+      session_id: sessionId,
+      command,
+      authorization_token: authorizationToken,
+      working_directory: workingDirectory,
     });
   }
 

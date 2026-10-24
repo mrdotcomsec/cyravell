@@ -46,6 +46,33 @@ async function runTests() {
     console.log('  ✓ evaluateGate fails safely when disconnected');
   }
 
+  // Test 7: getPendingApprovals throws if engine is disconnected
+  try {
+    await client.getPendingApprovals();
+    assert.fail('Expected error when getting pending approvals while disconnected');
+  } catch (e) {
+    assert.ok(e.message.includes('not connected'), 'Must throw not connected error');
+    console.log('  ✓ getPendingApprovals fails safely when disconnected');
+  }
+
+  // Test 8: decideApproval throws if engine is disconnected
+  try {
+    await client.decideApproval('appr-test-1', 'Approve');
+    assert.fail('Expected error when deciding approval while disconnected');
+  } catch (e) {
+    assert.ok(e.message.includes('not connected'), 'Must throw not connected error');
+    console.log('  ✓ decideApproval fails safely when disconnected');
+  }
+
+  // Test 9: dispatchAuthorized throws if engine is disconnected
+  try {
+    await client.dispatchAuthorized('appr-test-1', 'sess-1', 'ls', 'cyr-auth-fake');
+    assert.fail('Expected error when dispatching authorized command while disconnected');
+  } catch (e) {
+    assert.ok(e.message.includes('not connected'), 'Must throw not connected error');
+    console.log('  ✓ dispatchAuthorized fails safely when disconnected');
+  }
+
   console.log('✓ All extension client tests passed successfully!');
 }
 

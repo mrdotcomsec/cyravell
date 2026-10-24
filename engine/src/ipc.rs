@@ -11,6 +11,8 @@ use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
 use crate::audit::AuditLog;
+use crate::gate::approval::ApprovalManager;
+use crate::gate::backend::{ExecutionBackend, OsExecutionBackend};
 use crate::integrity::{verify_manifest, IntegrityStatus};
 use crate::model::*;
 use crate::policy::PolicyEngine;
@@ -21,6 +23,8 @@ pub struct EngineState {
     pub recent_events: Mutex<VecDeque<EvaluatedEventRecord>>,
     pub policy: PolicyEngine,
     pub audit: AuditLog,
+    pub approval_manager: Arc<ApprovalManager>,
+    pub backend: Arc<dyn ExecutionBackend>,
     pub manifest_path: Option<PathBuf>,
     pub base_dir: PathBuf,
     pub shutdown_requested: AtomicBool,
@@ -38,6 +42,24 @@ impl IpcServer {
         manifest_path: Option<PathBuf>,
         base_dir: PathBuf,
     ) -> Result<Self, Box<dyn std::error::Error>> {
+        Self::with_approval_and_backend(
+            socket_path,
+            data_dir,
+            manifest_path,
+            base_dir,
+            Arc::new(ApprovalManager::default()),
+            Arc::new(OsExecutionBackend::new(None)),
+        )
+    }
+
+    pub fn with_approval_and_backend<P: AsRef<Path>>(
+        socket_path: P,
+        data_dir: P,
+        manifest_path: Option<PathBuf>,
+        base_dir: PathBuf,
+        approval_manager: Arc<ApprovalManager>,
+        backend: Arc<dyn ExecutionBackend>,
+    ) -> Result<Self, Box<dyn std::error::Error>> {
         let socket_path = socket_path.as_ref().to_path_buf();
         let data_dir = data_dir.as_ref().to_path_buf();
 
@@ -50,12 +72,18 @@ impl IpcServer {
             recent_events: Mutex::new(VecDeque::with_capacity(100)),
             policy: PolicyEngine::new(),
             audit,
+            approval_manager,
+            backend,
             manifest_path,
             base_dir,
             shutdown_requested: AtomicBool::new(false),
         });
 
         Ok(Self { socket_path, state })
+    }
+
+    pub fn state(&self) -> &Arc<EngineState> {
+        &self.state
     }
 
     /// Prepares socket file, removing stale socket if present, or aborting if active.
@@ -333,6 +361,8 @@ fn dispatch_request(req: JsonRpcRequest, state: &Arc<EngineState>) -> JsonRpcRes
                         analysis_details: None,
                     },
                     analysis_completeness: AnalysisCompleteness::Complete,
+                    request_id: None,
+                    session_id: eval_params.session_id.clone(),
                     audit_sequence: None,
                     audit_record_hash: None,
                     reason: "Empty command string".to_string(),
@@ -361,6 +391,8 @@ fn dispatch_request(req: JsonRpcRequest, state: &Arc<EngineState>) -> JsonRpcRes
                         analysis_details: None,
                     },
                     analysis_completeness: AnalysisCompleteness::Complete,
+                    request_id: None,
+                    session_id: eval_params.session_id.clone(),
                     audit_sequence: None,
                     audit_record_hash: None,
                     reason: "Command contains illegal null byte".to_string(),
@@ -396,6 +428,26 @@ fn dispatch_request(req: JsonRpcRequest, state: &Arc<EngineState>) -> JsonRpcRes
                 ),
             };
 
+            // If RequireApproval, register with ApprovalManager
+            let (req_id, sess_id) = if decision == GateDecision::RequireApproval {
+                let s_id = eval_params
+                    .session_id
+                    .clone()
+                    .unwrap_or_else(|| "default-session".to_string());
+                let appr_req = state.approval_manager.create_request(
+                    s_id.clone(),
+                    raw_cmd.to_string(),
+                    eval_params.working_directory.clone(),
+                    assessment.rule_id.clone(),
+                    assessment.severity,
+                    assessment.reason.clone(),
+                    None,
+                );
+                (Some(appr_req.request_id), Some(s_id))
+            } else {
+                (None, eval_params.session_id.clone())
+            };
+
             // If command is blocked or pending approval, record it immediately in the audit chain
             let (audit_seq, audit_hash) = if !allow_dispatch {
                 let action = format!("GATE_{:?}", outcome);
@@ -422,6 +474,8 @@ fn dispatch_request(req: JsonRpcRequest, state: &Arc<EngineState>) -> JsonRpcRes
                 outcome,
                 risk_assessment: assessment.clone(),
                 analysis_completeness: assessment.analysis_completeness,
+                request_id: req_id,
+                session_id: sess_id,
                 audit_sequence: audit_seq,
                 audit_record_hash: audit_hash,
                 reason: assessment.reason.clone(),
@@ -470,6 +524,9 @@ fn dispatch_request(req: JsonRpcRequest, state: &Arc<EngineState>) -> JsonRpcRes
             let severity = match record_params.outcome {
                 ExecutionOutcome::BlockedByPolicy => Severity::Critical,
                 ExecutionOutcome::PendingApproval => Severity::High,
+                ExecutionOutcome::DeniedByUser => Severity::Medium,
+                ExecutionOutcome::CancelledByUser => Severity::Low,
+                ExecutionOutcome::ExpiredApproval => Severity::Low,
                 ExecutionOutcome::FailedClosed => Severity::High,
                 ExecutionOutcome::ExecutionFailed => Severity::Medium,
                 ExecutionOutcome::Dispatched => Severity::Low,
@@ -496,6 +553,262 @@ fn dispatch_request(req: JsonRpcRequest, state: &Arc<EngineState>) -> JsonRpcRes
                     Some(e.to_string()),
                 ),
             }
+        }
+
+        "approval.decide" => {
+            let params = match req.params {
+                Some(p) => p,
+                None => {
+                    return JsonRpcResponse::error(
+                        id,
+                        -32602,
+                        "Missing params for approval.decide".to_string(),
+                        None,
+                    )
+                }
+            };
+
+            let decide_params: ApprovalDecideParams = match serde_json::from_value(params) {
+                Ok(p) => p,
+                Err(e) => {
+                    return JsonRpcResponse::error(
+                        id,
+                        -32602,
+                        "Invalid approval.decide params format".to_string(),
+                        Some(e.to_string()),
+                    )
+                }
+            };
+
+            match state.approval_manager.decide(
+                &decide_params.request_id,
+                decide_params.decision,
+                decide_params.reason.clone(),
+            ) {
+                Ok((status, token)) => {
+                    let action = match status {
+                        ApprovalStatus::Approved => "APPROVAL_GRANTED",
+                        ApprovalStatus::Denied => "APPROVAL_DENIED",
+                        ApprovalStatus::Cancelled => "APPROVAL_CANCELLED",
+                        _ => "APPROVAL_DECIDED",
+                    };
+                    let rationale = format!(
+                        "Request: {}, Decision: {:?}, Reason: {:?}",
+                        decide_params.request_id, decide_params.decision, decide_params.reason
+                    );
+                    let seq = match state.audit.append(
+                        &format!("approval-{}", uuid::Uuid::new_v4()),
+                        action,
+                        &rationale,
+                        Severity::Medium,
+                    ) {
+                        Ok(rec) => Some(rec.sequence_number),
+                        Err(_) => None,
+                    };
+
+                    let res = ApprovalDecideResult {
+                        request_id: decide_params.request_id,
+                        status,
+                        authorization_token: token,
+                        audit_sequence: seq,
+                        message: format!(
+                            "Decision {:?} recorded successfully",
+                            decide_params.decision
+                        ),
+                    };
+                    JsonRpcResponse::success(id, serde_json::to_value(res).unwrap())
+                }
+                Err(e) => JsonRpcResponse::error(
+                    id,
+                    -32003,
+                    format!("Approval decision failed: {}", e),
+                    None,
+                ),
+            }
+        }
+
+        "approval.get_pending" => {
+            let session_id = if let Some(params) = req.params {
+                let p: Result<ApprovalGetPendingParams, _> = serde_json::from_value(params);
+                p.ok().and_then(|val| val.session_id)
+            } else {
+                None
+            };
+
+            let requests = state.approval_manager.get_pending(session_id.as_deref());
+            let res = ApprovalGetPendingResult {
+                pending_requests: requests,
+            };
+            JsonRpcResponse::success(id, serde_json::to_value(res).unwrap())
+        }
+
+        "gate.dispatch_authorized" => {
+            let params = match req.params {
+                Some(p) => p,
+                None => {
+                    return JsonRpcResponse::error(
+                        id,
+                        -32602,
+                        "Missing params for gate.dispatch_authorized".to_string(),
+                        None,
+                    )
+                }
+            };
+
+            let dispatch_params: GateDispatchAuthorizedParams = match serde_json::from_value(params)
+            {
+                Ok(p) => p,
+                Err(e) => {
+                    return JsonRpcResponse::error(
+                        id,
+                        -32602,
+                        "Invalid gate.dispatch_authorized params format".to_string(),
+                        Some(e.to_string()),
+                    )
+                }
+            };
+
+            // Input and boundary validation
+            if dispatch_params.command.trim().is_empty() {
+                return JsonRpcResponse::error(
+                    id,
+                    -32602,
+                    "Command cannot be empty".to_string(),
+                    None,
+                );
+            }
+            if dispatch_params.command.contains('\0') {
+                return JsonRpcResponse::error(
+                    id,
+                    -32602,
+                    "Command cannot contain null bytes".to_string(),
+                    None,
+                );
+            }
+            if dispatch_params.command.len() > 65536 {
+                return JsonRpcResponse::error(
+                    id,
+                    -32602,
+                    "Command exceeds 64KB limit".to_string(),
+                    None,
+                );
+            }
+            if dispatch_params.request_id.contains('\0')
+                || dispatch_params.session_id.contains('\0')
+                || dispatch_params.authorization_token.contains('\0')
+            {
+                return JsonRpcResponse::error(
+                    id,
+                    -32602,
+                    "Identifiers cannot contain null bytes".to_string(),
+                    None,
+                );
+            }
+
+            // Atomically validate and consume authorization token
+            let approved_req = match state.approval_manager.consume_authorization(
+                &dispatch_params.request_id,
+                &dispatch_params.session_id,
+                &dispatch_params.command,
+                &dispatch_params.authorization_token,
+            ) {
+                Ok(r) => r,
+                Err(e) => {
+                    let sanitized = crate::analysis::redact_command(&dispatch_params.command);
+                    let _ = state.audit.append(
+                        &format!("gate-unauth-{}", uuid::Uuid::new_v4()),
+                        "GATE_UNAUTHORIZED_DISPATCH_ATTEMPT",
+                        &format!(
+                            "Request: {}, Error: {}, Command: {}",
+                            dispatch_params.request_id, e, sanitized
+                        ),
+                        Severity::High,
+                    );
+                    return JsonRpcResponse::error(
+                        id,
+                        -32001,
+                        format!("Authorization rejected: {}", e),
+                        None,
+                    );
+                }
+            };
+
+            // Hard-block re-evaluation guard
+            let working_path = dispatch_params.working_directory.as_deref().map(Path::new);
+            let sanitized = crate::analysis::redact_command(&dispatch_params.command);
+            let assessment = state
+                .policy
+                .analyze_command_string(&sanitized, dispatch_params.working_directory.as_deref());
+            if assessment.recommended_action == "BLOCK_AND_ALERT" {
+                let _ = state.audit.append(
+                    &format!("gate-hardblock-{}", uuid::Uuid::new_v4()),
+                    "GATE_HARD_BLOCK_ENFORCED_AFTER_APPROVAL",
+                    &format!(
+                        "Request: {}, Command: {}, Reason: Hard-block policy cannot be bypassed",
+                        dispatch_params.request_id, sanitized
+                    ),
+                    Severity::Critical,
+                );
+                return JsonRpcResponse::error(
+                    id,
+                    -32004,
+                    "Policy violation: Command matches hard-block policy and cannot be dispatched"
+                        .to_string(),
+                    None,
+                );
+            }
+
+            // Dispatch to backend
+            let (dispatched, exit_code, outcome, error_msg) = match state
+                .backend
+                .execute(&dispatch_params.command, working_path)
+            {
+                Ok(code) => (true, Some(code), ExecutionOutcome::Dispatched, None),
+                Err(e) => (
+                    false,
+                    Some(127),
+                    ExecutionOutcome::ExecutionFailed,
+                    Some(e.to_string()),
+                ),
+            };
+
+            // Record outcome in cryptographic audit log
+            let action = if dispatched {
+                "GATE_DISPATCHED_AFTER_APPROVAL"
+            } else {
+                "GATE_DISPATCH_FAILED_AFTER_APPROVAL"
+            };
+            let detail = format!(
+                "Request: {}, Session: {}, ExitCode: {:?}, Detail: {}",
+                dispatch_params.request_id,
+                dispatch_params.session_id,
+                exit_code,
+                error_msg.as_deref().unwrap_or("none")
+            );
+            let (seq, hash) = match state.audit.append(
+                &format!("gate-auth-{}", uuid::Uuid::new_v4()),
+                action,
+                &format!("Command: {}, {}", sanitized, detail),
+                approved_req.severity,
+            ) {
+                Ok(rec) => (rec.sequence_number, rec.current_record_hash),
+                Err(_) => (0, "UNRECORDED".to_string()),
+            };
+
+            let res = GateDispatchAuthorizedResult {
+                request_id: dispatch_params.request_id,
+                dispatched,
+                exit_code,
+                outcome,
+                audit_sequence: seq,
+                audit_record_hash: hash,
+                message: if dispatched {
+                    "Command dispatched after verified authorization".to_string()
+                } else {
+                    format!("Dispatch failed: {}", error_msg.unwrap_or_default())
+                },
+            };
+            JsonRpcResponse::success(id, serde_json::to_value(res).unwrap())
         }
 
         "event.submit" => {

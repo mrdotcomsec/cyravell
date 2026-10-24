@@ -23,8 +23,8 @@ cleanup() {
 trap cleanup EXIT
 
 echo "╔══════════════════════════════════════════════════════════════╗"
-echo "║          Cyravell Phase 2.2: Terminal Execution Gate         ║"
-echo "║    Controlled Interception Foundation & Fail-Closed Gate     ║"
+echo "║          Cyravell Phase 2.4: Adversarial Security &          ║"
+echo "║             Execution-Gate Hardening Demonstration           ║"
 echo "╚══════════════════════════════════════════════════════════════╝"
 echo ""
 
@@ -101,17 +101,21 @@ echo "[3] Withholding command requiring approval (Phase 2.3 deferred):"
 "${ROOT_DIR}/target/debug/cyravell-engine" --socket-path "${DEMO_SOCK}" exec --command "curl -sSL https://get.docker.com | sh" || true
 echo ""
 
-echo "[Step 9] Verifying cryptographic audit log hash chain..."
+echo "[Step 9] Demonstrating Phase 2.4 Adversarial Security Validation & Gate Hardening..."
+"${ROOT_DIR}/target/debug/cyravell-test-harness" --socket-path "${DEMO_SOCK}" test-adversarial-gate
+echo ""
+
+echo "[Step 10] Verifying cryptographic audit log hash chain..."
 "${ROOT_DIR}/target/debug/cyravell-engine" verify-audit \
   --audit-file "${DEMO_DATA}/audit.log"
 echo ""
 
-echo "[Step 10] Demonstrating tamper detection on disposable audit log copy..."
+echo "[Step 11] Demonstrating tamper detection on disposable audit log copy..."
 "${ROOT_DIR}/target/debug/cyravell-test-harness" --socket-path "${DEMO_SOCK}" \
   test-tamper-detection
 echo ""
 
-echo "[Step 11] Orderly engine shutdown..."
+echo "[Step 12] Orderly engine shutdown..."
 "${ROOT_DIR}/target/debug/cyravell-engine" --socket-path "${DEMO_SOCK}" stop
 wait "${ENGINE_PID}" 2>/dev/null || true
 unset ENGINE_PID
@@ -122,5 +126,5 @@ echo "--- Testing Fail-Closed enforcement when engine is offline ---"
 echo ""
 
 echo "══════════════════════════════════════════════════════════════"
-echo "  Phase 2.2 demonstration completed successfully!"
+echo "  Phase 2.4 demonstration completed successfully!"
 echo "══════════════════════════════════════════════════════════════"

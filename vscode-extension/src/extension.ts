@@ -126,6 +126,65 @@ export function activate(context: vscode.ExtensionContext) {
     })
   );
 
+  context.subscriptions.push(
+    vscode.commands.registerCommand('cyravell.reviewApprovals', async () => {
+      try {
+        if (!client || client.getConnectionState() !== 'CONNECTED') {
+          vscode.window.showWarningMessage('Cyravell engine is not connected.');
+          return;
+        }
+
+        const pending = await client.getPendingApprovals();
+        if (pending.length === 0) {
+          vscode.window.showInformationMessage('No commands currently pending approval.');
+          return;
+        }
+
+        const items = pending.map((req) => ({
+          label: `$(shield) ${req.command}`,
+          description: `Severity: ${req.severity} | Rule: ${req.rule_id}`,
+          detail: `Reason: ${req.reason} (Expires: ${new Date(req.expires_at).toLocaleTimeString()})`,
+          request: req,
+        }));
+
+        const selected = await vscode.window.showQuickPick(items, {
+          placeHolder: 'Select a pending command to review',
+        });
+
+        if (!selected) {
+          return;
+        }
+
+        const decision = await vscode.window.showQuickPick(
+          [
+            { label: 'Approve', description: 'Grant single-use authorization for exact command' },
+            { label: 'Deny', description: 'Prevent command execution' },
+            { label: 'Cancel', description: 'Cancel pending approval request' },
+          ],
+          { placeHolder: `Action for: ${selected.request.command}` }
+        );
+
+        if (!decision) {
+          return;
+        }
+
+        const userDecision = decision.label as 'Approve' | 'Deny' | 'Cancel';
+        const res = await client.decideApproval(
+          selected.request.request_id,
+          userDecision,
+          'User decision via VS Code dialog'
+        );
+
+        vscode.window.showInformationMessage(
+          `Decision recorded: ${res.status}. ${res.message}`
+        );
+        statusProvider.refresh();
+      } catch (e: any) {
+        vscode.window.showErrorMessage(`Approval action failed: ${e.message}`);
+      }
+    })
+  );
+
   // Monitor terminal sessions for honest status reporting
   context.subscriptions.push(vscode.window.onDidOpenTerminal(() => statusProvider.refresh()));
   context.subscriptions.push(vscode.window.onDidCloseTerminal(() => statusProvider.refresh()));

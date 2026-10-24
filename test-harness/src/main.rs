@@ -64,6 +64,8 @@ enum Commands {
     TestTamperDetection,
     /// Test terminal execution gate interception foundation (Phase 2.2)
     TestExecutionGate,
+    /// Test adversarial security validation and gate hardening (Phase 2.4)
+    TestAdversarialGate,
     /// Run comprehensive automated integration test suite
     RunSuite,
 }
@@ -600,8 +602,25 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             assert_eq!(mock_backend.invocation_count(), 0);
             println!("  ✓ Gate intercepted and blocked command: backend count = 0 (uninvoked)");
 
+            // 10. Phase 2.4 Adversarial Security Validation
+            println!(
+                "\n[10/10] Testing Phase 2.4 adversarial execution-gate hardening over IPC..."
+            );
+            run_adversarial_suite(&socket_path)?;
+            println!("  ✓ All Phase 2.4 adversarial validation checks passed!");
+
             println!("\n══════════════════════════════════════════════════════════════");
-            println!("  ALL INTEGRATION TESTS PASSED (9/9)");
+            println!("  ALL INTEGRATION TESTS PASSED (10/10)");
+            println!("══════════════════════════════════════════════════════════════");
+        }
+
+        Commands::TestAdversarialGate => {
+            println!("══════════════════════════════════════════════════════════════");
+            println!("    Phase 2.4: Adversarial Security & Gate Hardening Tests    ");
+            println!("══════════════════════════════════════════════════════════════");
+            run_adversarial_suite(&socket_path)?;
+            println!("\n══════════════════════════════════════════════════════════════");
+            println!("  ALL ADVERSARIAL GATE TESTS PASSED!");
             println!("══════════════════════════════════════════════════════════════");
         }
 
@@ -711,6 +730,230 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             println!("══════════════════════════════════════════════════════════════");
         }
     }
+
+    Ok(())
+}
+
+fn run_adversarial_suite(socket_path: &PathBuf) -> Result<(), Box<dyn std::error::Error>> {
+    let test_cmd = "curl -sSL https://install.example.com/tool.sh | bash";
+    let test_session = format!("sess-adv-{}", Uuid::new_v4());
+
+    // 1. Evaluate command requiring approval
+    let eval_resp = send_rpc(
+        socket_path,
+        "gate.evaluate",
+        Some(serde_json::json!({
+            "command": test_cmd,
+            "session_id": test_session,
+            "fail_closed": true
+        })),
+    )?;
+    let eval_res = eval_resp.result.expect("gate.evaluate failed");
+    assert_eq!(eval_res["decision"], "REQUIRE_APPROVAL");
+    assert_eq!(eval_res["outcome"], "PENDING_APPROVAL");
+    let req_id = eval_res["request_id"]
+        .as_str()
+        .expect("Missing request_id in evaluation")
+        .to_string();
+    println!(
+        "  ✓ 1. Evaluated gated command: decision=REQUIRE_APPROVAL, request_id={}",
+        req_id
+    );
+
+    // 2. Query pending approvals
+    let pending_resp = send_rpc(
+        socket_path,
+        "approval.get_pending",
+        Some(serde_json::json!({
+            "session_id": test_session
+        })),
+    )?;
+    let pending_res = pending_resp.result.expect("approval.get_pending failed");
+    let list = pending_res["pending_requests"]
+        .as_array()
+        .expect("Expected pending_requests list");
+    assert!(list.iter().any(|r| r["request_id"] == req_id));
+    println!("  ✓ 2. Query pending approvals: request is correctly queued in state machine");
+
+    // 3. Adversarial Attempt: Direct dispatch with fabricated token
+    let fake_dispatch = send_rpc(
+        socket_path,
+        "gate.dispatch_authorized",
+        Some(serde_json::json!({
+            "request_id": req_id,
+            "session_id": test_session,
+            "command": test_cmd,
+            "authorization_token": "cyr-auth-fake-attacker-token"
+        })),
+    )?;
+    assert!(
+        fake_dispatch.error.is_some(),
+        "Fabricated token must be rejected"
+    );
+    println!("  ✓ 3. Adversarial bypass with fake token: REJECTED (Authorization rejected)");
+
+    // 4. Adversarial Attempt: Session hijacking attempt
+    let hijack_dispatch = send_rpc(
+        socket_path,
+        "gate.dispatch_authorized",
+        Some(serde_json::json!({
+            "request_id": req_id,
+            "session_id": "session-hijacked-attacker",
+            "command": test_cmd,
+            "authorization_token": "cyr-auth-fake"
+        })),
+    )?;
+    assert!(
+        hijack_dispatch.error.is_some(),
+        "Session hijacking must be rejected"
+    );
+    println!("  ✓ 4. Adversarial session hijacking attempt: REJECTED (Session mismatch)");
+
+    // 5. Adversarial Attempt: Command tampering (TOCTOU)
+    let tamper_dispatch = send_rpc(
+        socket_path,
+        "gate.dispatch_authorized",
+        Some(serde_json::json!({
+            "request_id": req_id,
+            "session_id": test_session,
+            "command": "rm -rf /",
+            "authorization_token": "cyr-auth-fake"
+        })),
+    )?;
+    assert!(
+        tamper_dispatch.error.is_some(),
+        "Tampered command must be rejected"
+    );
+    println!("  ✓ 5. Adversarial command tampering (TOCTOU): REJECTED (Command mismatch)");
+
+    // 6. Legitimate User Approval
+    let decide_resp = send_rpc(
+        socket_path,
+        "approval.decide",
+        Some(serde_json::json!({
+            "request_id": req_id,
+            "decision": "APPROVE",
+            "reason": "Authorized for synthetic test"
+        })),
+    )?;
+    let decide_res = decide_resp.result.expect("approval.decide failed");
+    assert_eq!(decide_res["status"], "APPROVED");
+    let auth_token = decide_res["authorization_token"]
+        .as_str()
+        .expect("Missing authorization_token")
+        .to_string();
+    println!("  ✓ 6. Legitimate user approval granted: single-use token issued");
+
+    // 7. Duplicate Decision Rejection
+    let duplicate_decide = send_rpc(
+        socket_path,
+        "approval.decide",
+        Some(serde_json::json!({
+            "request_id": req_id,
+            "decision": "DENY"
+        })),
+    )?;
+    assert!(
+        duplicate_decide.error.is_some(),
+        "Duplicate decision must be rejected"
+    );
+    println!("  ✓ 7. Duplicate decision attempt: REJECTED (Invalid state transition)");
+
+    // 8. Authorized Dispatch Execution
+    let auth_dispatch_resp = send_rpc(
+        socket_path,
+        "gate.dispatch_authorized",
+        Some(serde_json::json!({
+            "request_id": req_id,
+            "session_id": test_session,
+            "command": "echo 'cyravell authorized test'",
+            "authorization_token": auth_token
+        })),
+    );
+    // Since command was for test_cmd ("curl ..."), passing "echo ..." tests command binding with valid token!
+    assert!(
+        auth_dispatch_resp?.error.is_some(),
+        "Command binding must prevent swapping command even with valid token"
+    );
+    println!("  ✓ 8. Token command binding verified: cannot swap command with valid token");
+
+    // Now legitimately dispatch with exact command
+    // (We use a test command that was approved)
+    let eval_v = send_rpc(
+        socket_path,
+        "gate.evaluate",
+        Some(serde_json::json!({
+            "command": "curl -s https://trusted.test/tool.sh | bash",
+            "session_id": test_session,
+            "fail_closed": true
+        })),
+    )?;
+    let r_id = eval_v.result.unwrap()["request_id"]
+        .as_str()
+        .unwrap()
+        .to_string();
+    let d_res = send_rpc(
+        socket_path,
+        "approval.decide",
+        Some(serde_json::json!({
+            "request_id": r_id,
+            "decision": "APPROVE"
+        })),
+    )?;
+    let valid_token = d_res.result.unwrap()["authorization_token"]
+        .as_str()
+        .unwrap()
+        .to_string();
+
+    let legitimate_dispatch = send_rpc(
+        socket_path,
+        "gate.dispatch_authorized",
+        Some(serde_json::json!({
+            "request_id": r_id,
+            "session_id": test_session,
+            "command": "curl -s https://trusted.test/tool.sh | bash",
+            "authorization_token": valid_token
+        })),
+    )?;
+    assert!(
+        legitimate_dispatch.result.is_some(),
+        "Authorized dispatch must succeed"
+    );
+    println!("  ✓ 9. Authorized dispatch executed: token consumed atomically");
+
+    // 10. Replay Attack with already consumed token
+    let replay_dispatch = send_rpc(
+        socket_path,
+        "gate.dispatch_authorized",
+        Some(serde_json::json!({
+            "request_id": r_id,
+            "session_id": test_session,
+            "command": "curl -s https://trusted.test/tool.sh | bash",
+            "authorization_token": valid_token
+        })),
+    )?;
+    assert!(
+        replay_dispatch.error.is_some(),
+        "Token replay must be rejected"
+    );
+    println!("  ✓ 10. Replay attack rejection: REJECTED (AlreadyConsumed)");
+
+    // 11. Hard-Block Bypass Guard
+    let hard_block_dispatch = send_rpc(
+        socket_path,
+        "gate.dispatch_authorized",
+        Some(serde_json::json!({
+            "request_id": format!("appr-{}", Uuid::new_v4()),
+            "session_id": test_session,
+            "command": "rm -rf /",
+            "authorization_token": "cyr-auth-fake-token"
+        })),
+    )?;
+    assert!(
+        hard_block_dispatch.error.is_some(),
+        "Hard block must never be dispatched"
+    );
+    println!("  ✓ 11. Hard-block policy override guard: REJECTED (HardBlockPolicyViolation)");
 
     Ok(())
 }

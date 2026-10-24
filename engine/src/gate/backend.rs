@@ -1,6 +1,7 @@
 // Copyright 2026 Cyravell Contributors
 // SPDX-License-Identifier: Apache-2.0
 
+use chrono::{DateTime, Utc};
 use std::path::Path;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::Mutex;
@@ -110,6 +111,8 @@ pub struct MockExecutionBackend {
 pub struct MockInvocation {
     pub command: String,
     pub working_dir: Option<String>,
+    pub timestamp: DateTime<Utc>,
+    pub invocation_index: usize,
 }
 
 impl MockExecutionBackend {
@@ -148,6 +151,43 @@ impl MockExecutionBackend {
         self.invocation_count() > 0
     }
 
+    pub fn assert_zero_invocations(&self) {
+        let count = self.invocation_count();
+        assert_eq!(
+            count, 0,
+            "Execution backend invariant violated: expected 0 invocations, but found {}",
+            count
+        );
+    }
+
+    pub fn assert_invoked_exactly(&self, expected: usize) {
+        let count = self.invocation_count();
+        assert_eq!(
+            count, expected,
+            "Execution backend invariant violated: expected {} invocations, but found {}",
+            expected, count
+        );
+    }
+
+    pub fn assert_command_executed(&self, expected_cmd: &str) {
+        let list = self.commands_executed();
+        assert!(
+            list.iter().any(|c| c == expected_cmd),
+            "Expected command '{}' to be executed, but executed commands were: {:?}",
+            expected_cmd,
+            list
+        );
+    }
+
+    pub fn assert_command_never_executed(&self, command: &str) {
+        let list = self.commands_executed();
+        assert!(
+            !list.iter().any(|c| c == command),
+            "Invariant violated: command '{}' was dispatched when it should have been prevented. Dispatched list: {:?}",
+            command, list
+        );
+    }
+
     pub fn invocations(&self) -> Vec<MockInvocation> {
         self.invocations.lock().unwrap().clone()
     }
@@ -175,11 +215,13 @@ impl Default for MockExecutionBackend {
 
 impl ExecutionBackend for MockExecutionBackend {
     fn execute(&self, command: &str, working_dir: Option<&Path>) -> Result<i32, ExecutionError> {
-        self.call_count.fetch_add(1, Ordering::SeqCst);
+        let index = self.call_count.fetch_add(1, Ordering::SeqCst);
         let mut list = self.invocations.lock().unwrap();
         list.push(MockInvocation {
             command: command.to_string(),
             working_dir: working_dir.map(|p| p.display().to_string()),
+            timestamp: Utc::now(),
+            invocation_index: index,
         });
 
         if let Some(ref err) = *self.should_fail_spawn.lock().unwrap() {

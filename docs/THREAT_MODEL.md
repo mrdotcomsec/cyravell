@@ -128,6 +128,15 @@ We classify potential threat actors into the following tiers:
   - Release integrity manifest defining canonical relative paths and SHA-256 hashes.
   - Strict separation of trust anchors from monitored files.
 
+### 5.5 Execution Gate Bypass & Authorization Forgery (Phase 2.4 Hardening)
+- **Threat:** Malicious AI agent or local co-resident script attempts to dispatch unapproved or destructive commands by bypassing the authorization gate, forging approval tokens, replaying consumed tokens, or modifying commands between approval and execution (TOCTOU).
+- **Mitigation:**
+  - **Single-Use Cryptographic Tokens:** High-entropy authorization tokens (`cyr-auth-<uuid>-<uuid>`) stored in memory, invalid after single use or engine restart.
+  - **Atomic Consumption Before Dispatch:** The token is validated and consumed *before* the backend `execute()` call, preventing concurrent replay attacks.
+  - **Exact Command & Session Binding:** Tokens are bound character-for-character to the approved command string and session ID. Modifying, prepending, or appending commands fails with `CommandMismatch` or `SessionMismatch`.
+  - **Hard-Block Re-evaluation Guard:** At the moment of dispatch, the engine independently re-evaluates the command against policy. Hard-blocked commands (`Severity::Critical`) can never be dispatched even if a token was presented.
+  - **Fail-Closed Execution:** Any error, disconnection, or unhandled case withholds execution and records the event in the audit chain.
+
 ---
 
 ## 6. Security Assumptions

@@ -8,6 +8,8 @@ use std::time::Duration;
 use uuid::Uuid;
 
 use crate::model::{
+    ApprovalDecideParams, ApprovalDecideResult, ApprovalGetPendingParams, ApprovalGetPendingResult,
+    ApprovalUserDecision, GateDispatchAuthorizedParams, GateDispatchAuthorizedResult,
     GateEvaluateParams, GateEvaluateResult, GateRecordOutcomeParams, GateRecordOutcomeResult,
     JsonRpcRequest, JsonRpcResponse,
 };
@@ -99,11 +101,13 @@ impl GateEngineClient {
     pub fn evaluate(
         &self,
         command: &str,
+        session_id: Option<&str>,
         working_directory: Option<&str>,
         fail_closed: bool,
     ) -> Result<GateEvaluateResult, String> {
         let params = GateEvaluateParams {
             command: command.to_string(),
+            session_id: session_id.map(|s| s.to_string()),
             working_directory: working_directory.map(|s| s.to_string()),
             fail_closed,
         };
@@ -121,6 +125,87 @@ impl GateEngineClient {
 
         let res: GateEvaluateResult = serde_json::from_value(result_val)
             .map_err(|e| format!("Failed to deserialize GateEvaluateResult: {}", e))?;
+
+        Ok(res)
+    }
+
+    pub fn decide_approval(
+        &self,
+        request_id: &str,
+        decision: ApprovalUserDecision,
+        reason: Option<String>,
+    ) -> Result<ApprovalDecideResult, String> {
+        let params = ApprovalDecideParams {
+            request_id: request_id.to_string(),
+            decision,
+            reason,
+        };
+
+        let resp = self.send_request(
+            "approval.decide",
+            Some(serde_json::to_value(params).unwrap()),
+        )?;
+
+        if let Some(err) = resp.error {
+            return Err(format!("Engine error [{}]: {}", err.code, err.message));
+        }
+
+        let result_val = resp
+            .result
+            .ok_or_else(|| "Missing result in engine response".to_string())?;
+
+        let res: ApprovalDecideResult = serde_json::from_value(result_val)
+            .map_err(|e| format!("Failed to deserialize ApprovalDecideResult: {}", e))?;
+
+        Ok(res)
+    }
+
+    pub fn get_pending_approvals(
+        &self,
+        session_id: Option<&str>,
+    ) -> Result<ApprovalGetPendingResult, String> {
+        let params = ApprovalGetPendingParams {
+            session_id: session_id.map(|s| s.to_string()),
+        };
+
+        let resp = self.send_request(
+            "approval.get_pending",
+            Some(serde_json::to_value(params).unwrap()),
+        )?;
+
+        if let Some(err) = resp.error {
+            return Err(format!("Engine error [{}]: {}", err.code, err.message));
+        }
+
+        let result_val = resp
+            .result
+            .ok_or_else(|| "Missing result in engine response".to_string())?;
+
+        let res: ApprovalGetPendingResult = serde_json::from_value(result_val)
+            .map_err(|e| format!("Failed to deserialize ApprovalGetPendingResult: {}", e))?;
+
+        Ok(res)
+    }
+
+    pub fn dispatch_authorized(
+        &self,
+        params: GateDispatchAuthorizedParams,
+    ) -> Result<GateDispatchAuthorizedResult, String> {
+        let resp = self.send_request(
+            "gate.dispatch_authorized",
+            Some(serde_json::to_value(params).unwrap()),
+        )?;
+
+        if let Some(err) = resp.error {
+            return Err(format!("Engine error [{}]: {}", err.code, err.message));
+        }
+
+        let result_val = resp
+            .result
+            .ok_or_else(|| "Missing result in engine response".to_string())?;
+
+        let res: GateDispatchAuthorizedResult = serde_json::from_value(result_val)
+            .map_err(|e| format!("Failed to deserialize GateDispatchAuthorizedResult: {}", e))?;
 
         Ok(res)
     }

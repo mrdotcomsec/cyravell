@@ -52,6 +52,9 @@ pub enum ExecutionOutcome {
     Dispatched,
     BlockedByPolicy,
     PendingApproval,
+    DeniedByUser,
+    CancelledByUser,
+    ExpiredApproval,
     FailedClosed,
     ExecutionFailed,
 }
@@ -63,6 +66,25 @@ pub enum GateDecision {
     RequireApproval,
     Block,
     AnalysisFailed,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "SCREAMING_SNAKE_CASE")]
+pub enum ApprovalStatus {
+    Pending,
+    Approved,
+    Denied,
+    Expired,
+    Consumed,
+    Cancelled,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "SCREAMING_SNAKE_CASE")]
+pub enum ApprovalUserDecision {
+    Approve,
+    Deny,
+    Cancel,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -353,6 +375,8 @@ pub struct CommandAnalyzeResult {
 pub struct GateEvaluateParams {
     pub command: String,
     #[serde(default)]
+    pub session_id: Option<String>,
+    #[serde(default)]
     pub working_directory: Option<String>,
     #[serde(default = "default_fail_closed")]
     pub fail_closed: bool,
@@ -368,6 +392,10 @@ pub struct GateEvaluateResult {
     pub outcome: ExecutionOutcome,
     pub risk_assessment: RiskAssessment,
     pub analysis_completeness: AnalysisCompleteness,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub request_id: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub session_id: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub audit_sequence: Option<u64>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -394,4 +422,72 @@ pub struct GateRecordOutcomeResult {
     pub recorded: bool,
     pub audit_sequence: u64,
     pub audit_record_hash: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ApprovalRequest {
+    pub request_id: String,
+    pub session_id: String,
+    pub command: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub working_directory: Option<String>,
+    pub rule_id: String,
+    pub severity: Severity,
+    pub reason: String,
+    pub created_at: DateTime<Utc>,
+    pub expires_at: DateTime<Utc>,
+    pub status: ApprovalStatus,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub decision_reason: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ApprovalDecideParams {
+    pub request_id: String,
+    pub decision: ApprovalUserDecision,
+    #[serde(default)]
+    pub reason: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ApprovalDecideResult {
+    pub request_id: String,
+    pub status: ApprovalStatus,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub authorization_token: Option<String>,
+    pub message: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub audit_sequence: Option<u64>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ApprovalGetPendingParams {
+    #[serde(default)]
+    pub session_id: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ApprovalGetPendingResult {
+    pub pending_requests: Vec<ApprovalRequest>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct GateDispatchAuthorizedParams {
+    pub request_id: String,
+    pub session_id: String,
+    pub command: String,
+    pub authorization_token: String,
+    #[serde(default)]
+    pub working_directory: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct GateDispatchAuthorizedResult {
+    pub request_id: String,
+    pub dispatched: bool,
+    pub exit_code: Option<i32>,
+    pub outcome: ExecutionOutcome,
+    pub audit_sequence: u64,
+    pub audit_record_hash: String,
+    pub message: String,
 }
