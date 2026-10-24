@@ -12,6 +12,7 @@
     "Security",
     "Other"
   ],
+  "icon": "media/icon.png",
   "main": "./out/extension.js",
   "activationEvents": [
     "onStartupFinished"
