@@ -270,3 +270,52 @@ This verifies resistance against:
 4. Select a command and choose **Approve**, **Deny**, or **Cancel**.
 5. Once decided, the single-use authorization token is handled securely by the engine, and the decision is permanently recorded in the cryptographic audit log.
 
+---
+
+## 10. Pre-Installation Package Security Enforcement (Phase 2.5)
+
+### 10.1 Overview & Supported Package Managers
+Phase 2.5 adds pre-installation package security analysis directly into the execution gate. Before a package installation command runs, Cyravell statically analyzes the command, inspects local manifests and lockfiles, checks against a local advisory database, and authoritatively halts dangerous operations.
+
+Supported package managers and tools:
+- **npm / npx:** `npm install`, `npm add`, `npm update`, `npx <pkg>`
+- **pnpm:** `pnpm add`, `pnpm install`, `pnpm update`
+- **Yarn:** `yarn add`, `yarn install`, `yarn upgrade`
+- **pip / pip3 / python -m pip:** `pip install <pkg>`, `pip install -r requirements.txt`
+- **Cargo:** `cargo add <pkg>`, `cargo install <pkg>`, `cargo update`
+- **Wrappers:** `sudo npm install ...`, `env pnpm add ...`
+
+### 10.2 Gate Enforcement Rules
+1. **Hard Block on Confirmed Malicious Packages:**
+   - Packages flagged as known malicious (e.g. `flatmap-stream`, `node-ipc`, `cross-env.js`, `colorama-v2`, `rust-crypto-wasm`) are blocked with **zero backend invocations**.
+   - This block is non-overridable: no approval request is generated, and attempting to dispatch it fails closed.
+2. **Interactive Approval on Known Vulnerabilities:**
+   - Packages with known high-severity CVEs (e.g., `lodash@4.17.20`) require explicit developer approval before dispatch.
+3. **Lockfile & Manifest Integrity Checks:**
+   - Unpinned dependencies, manifest-lockfile mismatches, or malformed lockfiles trigger `REQUIRE_APPROVAL` with actionable diagnostic reasons.
+4. **TOCTOU Protection:**
+   - The engine computes a SHA-256 fingerprint over manifest and lockfiles at assessment time. If a file is modified between review and dispatch, `dispatch_authorized` rejects execution with error `-32005`.
+5. **No False Claims of Safety:**
+   - A clean dependency check returns `CleanNoMatches` and clearly states: *"No known advisory matches found (static assessment does not guarantee absence of 0-days)"*.
+
+### 10.3 Running Package Security Tests
+```bash
+# Run unit and mock gate tests for package inspection
+cargo test --lib package::tests -- --nocapture
+
+# Run the live IPC package security test suite via test harness
+cargo run --bin cyravell-test-harness -- test-package-gate
+```
+
+### 10.4 Troubleshooting Package Security Errors
+- **Error: `Project manifest or lockfile modified after approval was granted (TOCTOU detected)` (-32005):**
+  - **Cause:** `package.json`, `package-lock.json`, `Cargo.toml`, or `requirements.txt` was altered after the user approved the pending command.
+  - **Resolution:** Re-run the command in the controlled terminal to generate a fresh approval request matching the current workspace state.
+- **Error: `Package is confirmed malicious - gate hard-block cannot be overridden` (-32004):**
+  - **Cause:** The requested package is an active backdoor or supply chain attack.
+  - **Resolution:** Remove the malicious dependency from the install command or manifest. Do not bypass security controls.
+- **Warning: `Lockfile mismatch: package X declared in manifest but missing from lockfile`:**
+  - **Cause:** A dependency was added to `package.json` or `Cargo.toml` manually without updating the corresponding lockfile.
+  - **Resolution:** Run the appropriate lockfile update command (e.g. `npm install --package-lock-only` or `cargo check`) under developer review.
+
+

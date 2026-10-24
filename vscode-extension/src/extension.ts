@@ -140,12 +140,22 @@ export function activate(context: vscode.ExtensionContext) {
           return;
         }
 
-        const items = pending.map((req) => ({
-          label: `$(shield) ${req.command}`,
-          description: `Severity: ${req.severity} | Rule: ${req.rule_id}`,
-          detail: `Reason: ${req.reason} (Expires: ${new Date(req.expires_at).toLocaleTimeString()})`,
-          request: req,
-        }));
+        const items = pending.map((req) => {
+          let desc = `Severity: ${req.severity} | Rule: ${req.rule_id}`;
+          let detail = `Reason: ${req.reason}`;
+          if (req.package_details) {
+            desc = `Package: ${req.package_details.package_manager} (${req.package_details.operation}) | Severity: ${req.severity} | Findings: ${req.package_details.findings_count}`;
+            const pkgNames = req.package_details.findings.map((f) => f.package_name).join(', ');
+            detail = `Findings: [${pkgNames}] ${req.reason}`;
+          }
+          detail += ` (Expires: ${new Date(req.expires_at).toLocaleTimeString()})`;
+          return {
+            label: `$(shield) ${req.command}`,
+            description: desc,
+            detail: detail,
+            request: req,
+          };
+        });
 
         const selected = await vscode.window.showQuickPick(items, {
           placeHolder: 'Select a pending command to review',

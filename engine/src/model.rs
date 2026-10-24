@@ -400,6 +400,8 @@ pub struct GateEvaluateResult {
     pub audit_sequence: Option<u64>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub audit_record_hash: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub package_assessment: Option<PackageAssessmentResult>,
     pub reason: String,
     pub allow_dispatch: bool,
 }
@@ -439,6 +441,10 @@ pub struct ApprovalRequest {
     pub status: ApprovalStatus,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub decision_reason: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub package_details: Option<PackageAssessmentSummary>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub manifest_fingerprint: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -490,4 +496,78 @@ pub struct GateDispatchAuthorizedResult {
     pub audit_sequence: u64,
     pub audit_record_hash: String,
     pub message: String,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "SCREAMING_SNAKE_CASE")]
+pub enum PackageEcosystem {
+    Npm,
+    Pnpm,
+    Yarn,
+    Pip,
+    Cargo,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "SCREAMING_SNAKE_CASE")]
+pub enum PackageOperation {
+    InstallAll,
+    Add,
+    Update,
+    ExecuteScript,
+    RunPackage,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "SCREAMING_SNAKE_CASE")]
+pub enum AssessmentStatus {
+    CleanNoMatches,
+    VulnerabilitiesFound,
+    MaliciousPackageFound,
+    ManifestMismatch,
+    IntegrityMismatch,
+    InsufficientData,
+    UnsupportedEcosystem,
+    AssessmentFailed,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct PackageSecurityFinding {
+    pub package_name: String,
+    pub version: Option<String>,
+    pub advisory_id: String,
+    pub title: String,
+    pub severity: Severity,
+    pub is_malicious: bool,
+    pub affected_range: String,
+    pub fixed_version: Option<String>,
+    pub details: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct PackageAssessmentResult {
+    pub package_manager: PackageEcosystem,
+    pub operation: PackageOperation,
+    pub status: AssessmentStatus,
+    pub direct_packages: Vec<String>,
+    pub total_dependencies_scanned: usize,
+    pub findings: Vec<PackageSecurityFinding>,
+    pub manifest_fingerprint: Option<String>,
+    pub inspected_files: Vec<String>,
+    pub assessment_source: String,
+    pub offline_mode: bool,
+    pub notes: Vec<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct PackageAssessmentSummary {
+    pub package_manager: PackageEcosystem,
+    pub operation: PackageOperation,
+    pub status: AssessmentStatus,
+    pub findings_count: usize,
+    pub critical_count: usize,
+    pub high_count: usize,
+    pub malicious_count: usize,
+    pub findings: Vec<PackageSecurityFinding>,
+    pub manifest_fingerprint: Option<String>,
 }

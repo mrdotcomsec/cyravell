@@ -66,6 +66,8 @@ enum Commands {
     TestExecutionGate,
     /// Test adversarial security validation and gate hardening (Phase 2.4)
     TestAdversarialGate,
+    /// Test package security enforcement at the execution gate (Phase 2.5)
+    TestPackageGate,
     /// Run comprehensive automated integration test suite
     RunSuite,
 }
@@ -604,13 +606,28 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
             // 10. Phase 2.4 Adversarial Security Validation
             println!(
-                "\n[10/10] Testing Phase 2.4 adversarial execution-gate hardening over IPC..."
+                "\n[10/11] Testing Phase 2.4 adversarial execution-gate hardening over IPC..."
             );
             run_adversarial_suite(&socket_path)?;
             println!("  ✓ All Phase 2.4 adversarial validation checks passed!");
 
+            // 11. Phase 2.5 Package Security Enforcement
+            println!("\n[11/11] Testing Phase 2.5 package security enforcement over IPC...");
+            run_package_gate_suite(&socket_path)?;
+            println!("  ✓ All Phase 2.5 package security enforcement checks passed!");
+
             println!("\n══════════════════════════════════════════════════════════════");
-            println!("  ALL INTEGRATION TESTS PASSED (10/10)");
+            println!("  ALL INTEGRATION TESTS PASSED (11/11)");
+            println!("══════════════════════════════════════════════════════════════");
+        }
+
+        Commands::TestPackageGate => {
+            println!("══════════════════════════════════════════════════════════════");
+            println!("  Phase 2.5: Pre-Installation Package Security Gate Tests     ");
+            println!("══════════════════════════════════════════════════════════════");
+            run_package_gate_suite(&socket_path)?;
+            println!("\n══════════════════════════════════════════════════════════════");
+            println!("  ALL PACKAGE SECURITY GATE TESTS PASSED!");
             println!("══════════════════════════════════════════════════════════════");
         }
 
@@ -954,6 +971,127 @@ fn run_adversarial_suite(socket_path: &PathBuf) -> Result<(), Box<dyn std::error
         "Hard block must never be dispatched"
     );
     println!("  ✓ 11. Hard-block policy override guard: REJECTED (HardBlockPolicyViolation)");
+
+    Ok(())
+}
+
+fn run_package_gate_suite(socket_path: &PathBuf) -> Result<(), Box<dyn std::error::Error>> {
+    let test_dir = tempdir()?;
+
+    // 1. Known Malicious Package: hard block
+    let eval_mal = send_rpc(
+        socket_path,
+        "gate.evaluate",
+        Some(serde_json::json!({
+            "command": "npm install flatmap-stream@0.1.1",
+            "working_directory": test_dir.path().display().to_string(),
+            "session_id": "pkg-test-sess"
+        })),
+    )?;
+    let mal_res = eval_mal.result.expect("gate.evaluate malicious failed");
+    assert_eq!(mal_res["decision"], "BLOCK");
+    assert_eq!(mal_res["outcome"], "BLOCKED_BY_POLICY");
+    assert_eq!(mal_res["allow_dispatch"], false);
+    assert_eq!(
+        mal_res["package_assessment"]["status"],
+        "MALICIOUS_PACKAGE_FOUND"
+    );
+    assert!(mal_res["package_assessment"]["findings"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .any(|f| f["is_malicious"] == true));
+    println!("  ✓ 1. Malicious package flatmap-stream hard-blocked with zero backend dispatch");
+
+    // 2. Known Malicious Typosquat: hard block
+    let eval_typo = send_rpc(
+        socket_path,
+        "gate.evaluate",
+        Some(serde_json::json!({
+            "command": "npm install cross-env.js",
+            "working_directory": test_dir.path().display().to_string(),
+            "session_id": "pkg-test-sess"
+        })),
+    )?;
+    let typo_res = eval_typo.result.expect("gate.evaluate typosquat failed");
+    assert_eq!(typo_res["decision"], "BLOCK");
+    assert_eq!(
+        typo_res["package_assessment"]["status"],
+        "MALICIOUS_PACKAGE_FOUND"
+    );
+    println!("  ✓ 2. Typosquat package cross-env.js hard-blocked");
+
+    // 3. Vulnerable Package: RequireApproval and authorization workflow
+    let eval_vuln = send_rpc(
+        socket_path,
+        "gate.evaluate",
+        Some(serde_json::json!({
+            "command": "npm install lodash@4.17.20",
+            "working_directory": test_dir.path().display().to_string(),
+            "session_id": "pkg-test-sess"
+        })),
+    )?;
+    let vuln_res = eval_vuln.result.expect("gate.evaluate vuln failed");
+    assert_eq!(vuln_res["decision"], "REQUIRE_APPROVAL");
+    assert_eq!(vuln_res["outcome"], "PENDING_APPROVAL");
+    assert_eq!(
+        vuln_res["package_assessment"]["status"],
+        "VULNERABILITIES_FOUND"
+    );
+    let req_id = vuln_res["request_id"]
+        .as_str()
+        .expect("Expected request_id")
+        .to_string();
+    println!(
+        "  ✓ 3. Vulnerable package lodash@4.17.20 requires approval: request_id={}",
+        req_id
+    );
+
+    // 4. Approve request and dispatch authorized
+    let decide_res = send_rpc(
+        socket_path,
+        "approval.decide",
+        Some(serde_json::json!({
+            "request_id": req_id,
+            "decision": "APPROVE"
+        })),
+    )?;
+    let auth_token = decide_res.result.unwrap()["authorization_token"]
+        .as_str()
+        .unwrap()
+        .to_string();
+
+    let dispatch_res = send_rpc(
+        socket_path,
+        "gate.dispatch_authorized",
+        Some(serde_json::json!({
+            "request_id": req_id,
+            "session_id": "pkg-test-sess",
+            "command": "npm install lodash@4.17.20",
+            "authorization_token": auth_token,
+            "working_directory": test_dir.path().display().to_string()
+        })),
+    )?;
+    assert!(
+        dispatch_res.result.is_some(),
+        "Authorized dispatch for approved package should succeed"
+    );
+    println!("  ✓ 4. Approved package operation dispatched with single-use authorization token");
+
+    // 5. Clean benign package operation
+    let eval_clean = send_rpc(
+        socket_path,
+        "gate.evaluate",
+        Some(serde_json::json!({
+            "command": "cargo check",
+            "working_directory": test_dir.path().display().to_string(),
+            "session_id": "pkg-test-sess"
+        })),
+    )?;
+    let clean_res = eval_clean.result.expect("gate.evaluate clean failed");
+    assert_eq!(clean_res["decision"], "ALLOW");
+    assert_eq!(clean_res["allow_dispatch"], true);
+    println!("  ✓ 5. Clean package operation (cargo check) evaluated and allowed");
 
     Ok(())
 }

@@ -1,6 +1,6 @@
  # Cyravell — Threat Model
 
-**Version:** 1.0.0 (Phase 1: Foundation & Vertical Slice)  
+**Version:** 2.5.0 (Phase 2.5: Package Security Enforcement)  
 **Status:** Approved  
 **Classification:** Public / Open Source  
 
@@ -137,6 +137,18 @@ We classify potential threat actors into the following tiers:
   - **Hard-Block Re-evaluation Guard:** At the moment of dispatch, the engine independently re-evaluates the command against policy. Hard-blocked commands (`Severity::Critical`) can never be dispatched even if a token was presented.
   - **Fail-Closed Execution:** Any error, disconnection, or unhandled case withholds execution and records the event in the audit chain.
 
+### 5.6 Package Security, Supply Chain Attacks, & TOCTOU Manifest Alterations (Phase 2.5)
+- **Threat:** Malicious AI agent attempts to install backdoored packages, protestware, typosquatted dependencies, packages with critical known CVEs, or tamper with project manifests (`package.json`, `Cargo.toml`, `requirements.txt`) or lockfiles between security review and execution.
+- **Mitigation:**
+  - **Pre-Installation Command Detection:** Authoritative detection across `npm`, `pnpm`, `Yarn`, `pip`, `pip3`, `python -m pip`, `npx`, `Cargo`, unwrapping execution wrappers (`sudo`, `env`).
+  - **Authoritative Gate Hard-Block for Known Malicious Packages:** Packages marked malicious (`is_malicious: true`) in the advisory database are hard-blocked at the gate with zero backend execution calls; this block cannot be overridden by user approval tokens.
+  - **Manifest & Lockfile Integrity Analysis:** Static inspection detects manifest-lockfile mismatches (declared dependencies missing from lockfile or unpinned), lockfile integrity format errors, and parse failures, requiring human approval before dispatch.
+  - **TOCTOU Manifest Fingerprinting:** The gate computes a SHA-256 fingerprint over manifest and lockfile during evaluation and binds it to any approval request. At `dispatch_authorized`, the fingerprint is recomputed; if files were modified after approval, execution is immediately aborted (`ApprovalError::InvalidStateTransition`).
+  - **Deterministic Offline Advisories:** Advisory matching is performed completely locally (`rules/package_advisories.json` + compiled fallback) without external network telemetry.
+- **Threat Model Boundaries & Non-Claims:**
+  - **Static Pre-Exec Limitation:** Cyravell inspects commands and project files before execution. It does not inspect dynamically downloaded binary blobs or child processes spawned by uninstrumented package manager sub-scripts unless run in the controlled terminal.
+  - **Advisory Database Scope:** Cyravell detects known malicious packages and advisories present in its local database. Clean status (`CleanNoMatches`) conveys "no matches found in verified local database", not proof of absolute safety against unknown zero-days.
+
 ---
 
 ## 6. Security Assumptions
@@ -155,10 +167,11 @@ We classify potential threat actors into the following tiers:
 
 ---
 
-## 8. Known Limitations (Phase 2.1)
+## 8. Known Limitations (Phase 2.5)
 
-- **Static Classification vs. Real-Time Blocking:** Phase 2.1 implements static command security analysis and risk classification. It does not claim real-time OS-level command interception or process blocking. Real command interception requires subsequent PTY or eBPF layers.
+- **Static Classification vs. Real-Time Blocking:** The execution gate blocks commands initiated through Cyravell's controlled terminal (`cyravell-engine shell`, `exec`, or VS Code Protected Terminal). Commands entered into unmonitored external shells run directly without gate interception.
 - **Audit Tamper Evident, Not Tamper Proof:** A local user with write access to the filesystem can theoretically rewrite the log and recompute a fraudulent hash chain if they possess all trust material. True non-repudiation requires remote append-only anchoring (Phase 3).
+- **Package Advisory Scope:** Cyravell checks against the local advisory database. It does not perform live network queries to npm/PyPI/crates.io (to protect developer privacy and air-gap integrity). A clean check indicates no matches in the local database, not an absence of risk.
 - **Parser Approximations:** Pure static analysis cannot fully resolve dynamic multi-stage variable expansions or remote runtime code strings without execution. Complex or unclosed constructs are honestly flagged as `PARTIAL` or `INCONCLUSIVE`.
 
 ---

@@ -104,6 +104,33 @@ impl ApprovalManager {
         reason: String,
         ttl_seconds: Option<i64>,
     ) -> ApprovalRequest {
+        self.create_request_with_package_details(
+            session_id,
+            command,
+            working_directory,
+            rule_id,
+            severity,
+            reason,
+            ttl_seconds,
+            None,
+            None,
+        )
+    }
+
+    /// Creates a new pending approval request with optional package assessment details.
+    #[allow(clippy::too_many_arguments)]
+    pub fn create_request_with_package_details(
+        &self,
+        session_id: String,
+        command: String,
+        working_directory: Option<String>,
+        rule_id: String,
+        severity: Severity,
+        reason: String,
+        ttl_seconds: Option<i64>,
+        package_details: Option<crate::model::PackageAssessmentSummary>,
+        manifest_fingerprint: Option<String>,
+    ) -> ApprovalRequest {
         let request_id = format!("appr-{}", Uuid::new_v4());
         let now = Utc::now();
         let ttl = ttl_seconds.unwrap_or(self.default_ttl_seconds);
@@ -121,6 +148,8 @@ impl ApprovalManager {
             expires_at,
             status: ApprovalStatus::Pending,
             decision_reason: None,
+            package_details,
+            manifest_fingerprint,
         };
 
         let stored = StoredApproval {

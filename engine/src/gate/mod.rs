@@ -21,10 +21,11 @@ pub use shell::ControlledShell;
 
 use crate::audit::AuditLog;
 use crate::model::{
-    AnalysisCompleteness, Confidence, ExecutionOutcome, GateDecision, GateDispatchAuthorizedParams,
-    GateDispatchAuthorizedResult, GateEvaluateResult, GateRecordOutcomeParams, RiskAssessment,
-    Severity,
+    AnalysisCompleteness, AssessmentStatus, Confidence, ExecutionOutcome, GateDecision,
+    GateDispatchAuthorizedParams, GateDispatchAuthorizedResult, GateEvaluateResult,
+    GateRecordOutcomeParams, PackageAssessmentResult, RiskAssessment, Severity,
 };
+use crate::package::{summarize_assessment, PackageSecurityAssessor};
 use crate::policy::PolicyEngine;
 
 #[derive(Debug, Clone)]
@@ -47,6 +48,7 @@ pub struct ExecutionGate {
     in_process_policy: Option<PolicyEngine>,
     in_process_audit: Option<Arc<AuditLog>>,
     approval_manager: Arc<ApprovalManager>,
+    package_assessor: Arc<PackageSecurityAssessor>,
     fail_closed: bool,
 }
 
@@ -58,6 +60,7 @@ struct RecordOutcomeContext<'a> {
     working_dir: Option<&'a Path>,
     error_msg: Option<String>,
     severity: Severity,
+    package_assessment: Option<&'a PackageAssessmentResult>,
 }
 
 impl ExecutionGate {
@@ -92,8 +95,18 @@ impl ExecutionGate {
             in_process_policy,
             in_process_audit,
             approval_manager,
+            package_assessor: Arc::new(PackageSecurityAssessor::default()),
             fail_closed,
         }
+    }
+
+    pub fn with_package_assessor(mut self, package_assessor: Arc<PackageSecurityAssessor>) -> Self {
+        self.package_assessor = package_assessor;
+        self
+    }
+
+    pub fn package_assessor(&self) -> &Arc<PackageSecurityAssessor> {
+        &self.package_assessor
     }
 
     pub fn approval_manager(&self) -> &Arc<ApprovalManager> {
@@ -139,6 +152,7 @@ impl ExecutionGate {
                 audit_record_hash: None,
                 reason: "Empty command string".to_string(),
                 allow_dispatch: false,
+                package_assessment: None,
             };
         }
 
@@ -168,6 +182,7 @@ impl ExecutionGate {
                 audit_record_hash: None,
                 reason: "Command contains illegal null bytes".to_string(),
                 allow_dispatch: false,
+                package_assessment: None,
             };
         }
 
@@ -197,6 +212,7 @@ impl ExecutionGate {
                 audit_record_hash: None,
                 reason: "Command exceeds 64KB size limit".to_string(),
                 allow_dispatch: false,
+                package_assessment: None,
             };
         }
 
@@ -235,7 +251,318 @@ impl ExecutionGate {
                             audit_record_hash: None,
                             reason: format!("IPC evaluation failed; fail-closed active: {}", e),
                             allow_dispatch: false,
+                            package_assessment: None,
                         };
+                    }
+                }
+            }
+        }
+
+        // Step 2.5: Pre-Installation Package Security Assessment
+        let mut attached_package_assessment = None;
+        if self.package_assessor.config().enabled {
+            let working_path = working_dir.unwrap_or_else(|| Path::new("."));
+            if let Some(pkg_res) = self
+                .package_assessor
+                .assess_command_string(command, working_path)
+            {
+                match pkg_res.status {
+                    AssessmentStatus::MaliciousPackageFound => {
+                        let names: Vec<String> = pkg_res
+                            .findings
+                            .iter()
+                            .filter(|f| f.is_malicious)
+                            .map(|f| f.package_name.clone())
+                            .collect();
+                        let rule_ids: Vec<String> = pkg_res
+                            .findings
+                            .iter()
+                            .filter(|f| f.is_malicious)
+                            .map(|f| f.advisory_id.clone())
+                            .collect();
+                        let evidence: Vec<String> = pkg_res
+                            .findings
+                            .iter()
+                            .filter(|f| f.is_malicious)
+                            .map(|f| format!("{}: {}", f.package_name, f.title))
+                            .collect();
+
+                        let risk = RiskAssessment {
+                            severity: Severity::Critical,
+                            confidence: Confidence::High,
+                            rule_id: "RULE-PACKAGE-MALICIOUS".to_string(),
+                            reason: format!(
+                                "Blocked: Known malicious package(s) detected: {}",
+                                names.join(", ")
+                            ),
+                            evidence,
+                            recommended_action: "BLOCK_AND_ALERT".to_string(),
+                            evaluated_at: chrono::Utc::now(),
+                            matched_rules: if rule_ids.is_empty() {
+                                vec!["RULE-PACKAGE-MALICIOUS".to_string()]
+                            } else {
+                                rule_ids
+                            },
+                            potential_impact: Some(
+                                "Supply chain malware execution or credential theft".to_string(),
+                            ),
+                            analysis_completeness: AnalysisCompleteness::Complete,
+                            analysis_details: None,
+                        };
+
+                        return GateEvaluateResult {
+                            decision: GateDecision::Block,
+                            outcome: ExecutionOutcome::BlockedByPolicy,
+                            risk_assessment: risk,
+                            analysis_completeness: AnalysisCompleteness::Complete,
+                            request_id: None,
+                            session_id: sid,
+                            audit_sequence: None,
+                            audit_record_hash: None,
+                            reason: format!(
+                                "Blocked by package security enforcement: known malicious package(s) {}",
+                                names.join(", ")
+                            ),
+                            allow_dispatch: false,
+                            package_assessment: Some(pkg_res),
+                        };
+                    }
+
+                    AssessmentStatus::VulnerabilitiesFound => {
+                        let has_critical = pkg_res
+                            .findings
+                            .iter()
+                            .any(|f| f.severity == Severity::Critical);
+                        if has_critical && self.package_assessor.config().hard_block_critical_vulns
+                        {
+                            let risk = RiskAssessment {
+                                severity: Severity::Critical,
+                                confidence: Confidence::High,
+                                rule_id: "RULE-PACKAGE-CRITICAL-VULN-BLOCKED".to_string(),
+                                reason: format!(
+                                    "Blocked: Critical package vulnerability detected under hard-block policy ({} findings)",
+                                    pkg_res.findings.len()
+                                ),
+                                evidence: pkg_res
+                                    .findings
+                                    .iter()
+                                    .map(|f| format!("{}: {}", f.package_name, f.title))
+                                    .collect(),
+                                recommended_action: "BLOCK_AND_ALERT".to_string(),
+                                evaluated_at: chrono::Utc::now(),
+                                matched_rules: pkg_res
+                                    .findings
+                                    .iter()
+                                    .map(|f| f.advisory_id.clone())
+                                    .collect(),
+                                potential_impact: Some("Vulnerable package exploitation".to_string()),
+                                analysis_completeness: AnalysisCompleteness::Complete,
+                                analysis_details: None,
+                            };
+
+                            return GateEvaluateResult {
+                                decision: GateDecision::Block,
+                                outcome: ExecutionOutcome::BlockedByPolicy,
+                                risk_assessment: risk,
+                                analysis_completeness: AnalysisCompleteness::Complete,
+                                request_id: None,
+                                session_id: sid,
+                                audit_sequence: None,
+                                audit_record_hash: None,
+                                reason: "Blocked: Critical package vulnerability detected"
+                                    .to_string(),
+                                allow_dispatch: false,
+                                package_assessment: Some(pkg_res),
+                            };
+                        } else {
+                            let max_sev = pkg_res
+                                .findings
+                                .iter()
+                                .map(|f| f.severity)
+                                .max()
+                                .unwrap_or(Severity::High);
+                            let s_id = session_id.unwrap_or("default-session").to_string();
+                            let summary = summarize_assessment(&pkg_res);
+                            let appr_req =
+                                self.approval_manager.create_request_with_package_details(
+                                    s_id,
+                                    command.to_string(),
+                                    dir_str.clone(),
+                                    "RULE-PACKAGE-VULNERABILITY".to_string(),
+                                    max_sev,
+                                    format!(
+                                        "Package review required: {} vulnerability finding(s)",
+                                        pkg_res.findings.len()
+                                    ),
+                                    None,
+                                    Some(summary),
+                                    pkg_res.manifest_fingerprint.clone(),
+                                );
+
+                            let risk = RiskAssessment {
+                                severity: max_sev,
+                                confidence: Confidence::High,
+                                rule_id: "RULE-PACKAGE-VULNERABILITY".to_string(),
+                                reason: format!(
+                                    "Known package vulnerabilities detected ({} findings)",
+                                    pkg_res.findings.len()
+                                ),
+                                evidence: pkg_res
+                                    .findings
+                                    .iter()
+                                    .map(|f| format!("{}: {}", f.package_name, f.title))
+                                    .collect(),
+                                recommended_action: "ALERT_AND_CONFIRM".to_string(),
+                                evaluated_at: chrono::Utc::now(),
+                                matched_rules: pkg_res
+                                    .findings
+                                    .iter()
+                                    .map(|f| f.advisory_id.clone())
+                                    .collect(),
+                                potential_impact: Some(
+                                    "Security exposure from vulnerable package versions"
+                                        .to_string(),
+                                ),
+                                analysis_completeness: AnalysisCompleteness::Complete,
+                                analysis_details: None,
+                            };
+
+                            return GateEvaluateResult {
+                                decision: GateDecision::RequireApproval,
+                                outcome: ExecutionOutcome::PendingApproval,
+                                risk_assessment: risk,
+                                analysis_completeness: AnalysisCompleteness::Complete,
+                                request_id: Some(appr_req.request_id),
+                                session_id: sid,
+                                audit_sequence: None,
+                                audit_record_hash: None,
+                                reason: format!(
+                                    "Approval required: Package security findings detected ({} findings)",
+                                    pkg_res.findings.len()
+                                ),
+                                allow_dispatch: false,
+                                package_assessment: Some(pkg_res),
+                            };
+                        }
+                    }
+
+                    AssessmentStatus::IntegrityMismatch | AssessmentStatus::ManifestMismatch => {
+                        let is_integ = pkg_res.status == AssessmentStatus::IntegrityMismatch;
+                        let rule_id = if is_integ {
+                            "RULE-PACKAGE-INTEGRITY-MISMATCH".to_string()
+                        } else {
+                            "RULE-PACKAGE-MANIFEST-MISMATCH".to_string()
+                        };
+                        let reason_str = if is_integ {
+                            "Package lockfile integrity format mismatch or invalid checksum"
+                                .to_string()
+                        } else {
+                            "Mismatch detected between project manifest and lockfile dependencies"
+                                .to_string()
+                        };
+
+                        let s_id = session_id.unwrap_or("default-session").to_string();
+                        let summary = summarize_assessment(&pkg_res);
+                        let appr_req = self.approval_manager.create_request_with_package_details(
+                            s_id,
+                            command.to_string(),
+                            dir_str.clone(),
+                            rule_id.clone(),
+                            Severity::High,
+                            reason_str.clone(),
+                            None,
+                            Some(summary),
+                            pkg_res.manifest_fingerprint.clone(),
+                        );
+
+                        let risk = RiskAssessment {
+                            severity: Severity::High,
+                            confidence: Confidence::High,
+                            rule_id: rule_id.clone(),
+                            reason: reason_str.clone(),
+                            evidence: pkg_res.notes.clone(),
+                            recommended_action: "ALERT_AND_CONFIRM".to_string(),
+                            evaluated_at: chrono::Utc::now(),
+                            matched_rules: vec![rule_id],
+                            potential_impact: Some(
+                                "Tampered lockfile or unpinned dependency alteration".to_string(),
+                            ),
+                            analysis_completeness: AnalysisCompleteness::Complete,
+                            analysis_details: None,
+                        };
+
+                        return GateEvaluateResult {
+                            decision: GateDecision::RequireApproval,
+                            outcome: ExecutionOutcome::PendingApproval,
+                            risk_assessment: risk,
+                            analysis_completeness: AnalysisCompleteness::Complete,
+                            request_id: Some(appr_req.request_id),
+                            session_id: sid,
+                            audit_sequence: None,
+                            audit_record_hash: None,
+                            reason: reason_str,
+                            allow_dispatch: false,
+                            package_assessment: Some(pkg_res),
+                        };
+                    }
+
+                    AssessmentStatus::AssessmentFailed => {
+                        if self.fail_closed {
+                            let s_id = session_id.unwrap_or("default-session").to_string();
+                            let summary = summarize_assessment(&pkg_res);
+                            let appr_req =
+                                self.approval_manager.create_request_with_package_details(
+                                    s_id,
+                                    command.to_string(),
+                                    dir_str.clone(),
+                                    "RULE-PACKAGE-PARSE-FAILED".to_string(),
+                                    Severity::High,
+                                    "Package manifest or lockfile parsing failed; review required"
+                                        .to_string(),
+                                    None,
+                                    Some(summary),
+                                    pkg_res.manifest_fingerprint.clone(),
+                                );
+
+                            let risk = RiskAssessment {
+                                severity: Severity::High,
+                                confidence: Confidence::High,
+                                rule_id: "RULE-PACKAGE-PARSE-FAILED".to_string(),
+                                reason:
+                                    "Package manifest inspection failed under fail-closed policy"
+                                        .to_string(),
+                                evidence: pkg_res.notes.clone(),
+                                recommended_action: "ALERT_AND_CONFIRM".to_string(),
+                                evaluated_at: chrono::Utc::now(),
+                                matched_rules: vec!["RULE-PACKAGE-PARSE-FAILED".to_string()],
+                                potential_impact: Some(
+                                    "Uninspected malformed manifest execution".to_string(),
+                                ),
+                                analysis_completeness: AnalysisCompleteness::Inconclusive,
+                                analysis_details: None,
+                            };
+
+                            return GateEvaluateResult {
+                                decision: GateDecision::RequireApproval,
+                                outcome: ExecutionOutcome::PendingApproval,
+                                risk_assessment: risk,
+                                analysis_completeness: AnalysisCompleteness::Inconclusive,
+                                request_id: Some(appr_req.request_id),
+                                session_id: sid,
+                                audit_sequence: None,
+                                audit_record_hash: None,
+                                reason: "Package manifest parsing failed under fail-closed policy"
+                                    .to_string(),
+                                allow_dispatch: false,
+                                package_assessment: Some(pkg_res),
+                            };
+                        }
+                    }
+
+                    AssessmentStatus::CleanNoMatches
+                    | AssessmentStatus::InsufficientData
+                    | AssessmentStatus::UnsupportedEcosystem => {
+                        attached_package_assessment = Some(pkg_res);
                     }
                 }
             }
@@ -291,6 +618,7 @@ impl ExecutionGate {
                 audit_record_hash: None,
                 reason: assessment.reason.clone(),
                 allow_dispatch,
+                package_assessment: attached_package_assessment,
             };
         }
 
@@ -322,6 +650,7 @@ impl ExecutionGate {
             audit_record_hash: None,
             reason: "No policy engine configured; fail-closed active".to_string(),
             allow_dispatch: false,
+            package_assessment: attached_package_assessment,
         }
     }
 
@@ -353,6 +682,7 @@ impl ExecutionGate {
                             working_dir,
                             error_msg: None,
                             severity: eval.risk_assessment.severity,
+                            package_assessment: eval.package_assessment.as_ref(),
                         });
 
                         GateResult {
@@ -377,6 +707,7 @@ impl ExecutionGate {
                             working_dir,
                             error_msg: Some(e.to_string()),
                             severity: eval.risk_assessment.severity,
+                            package_assessment: eval.package_assessment.as_ref(),
                         });
 
                         GateResult {
@@ -409,6 +740,7 @@ impl ExecutionGate {
                         eval.request_id
                     )),
                     severity: eval.risk_assessment.severity,
+                    package_assessment: eval.package_assessment.as_ref(),
                 });
 
                 GateResult {
@@ -436,6 +768,7 @@ impl ExecutionGate {
                     working_dir,
                     error_msg: Some("Execution blocked by Cyravell security policy".to_string()),
                     severity: eval.risk_assessment.severity,
+                    package_assessment: eval.package_assessment.as_ref(),
                 });
 
                 GateResult {
@@ -465,6 +798,7 @@ impl ExecutionGate {
                         "Execution withheld under fail-closed security policy".to_string(),
                     ),
                     severity: eval.risk_assessment.severity,
+                    package_assessment: eval.package_assessment.as_ref(),
                 });
 
                 GateResult {
@@ -554,6 +888,29 @@ impl ExecutionGate {
                 Severity::Critical,
             );
             return Err(ApprovalError::HardBlockPolicyViolation);
+        }
+
+        // Step 3.5: TOCTOU Manifest Fingerprint Verification
+        if let Some(ref orig_fp) = approved_req.manifest_fingerprint {
+            if let Some(ref pkg_res) = eval.package_assessment {
+                if let Some(ref current_fp) = pkg_res.manifest_fingerprint {
+                    if current_fp != orig_fp {
+                        let sanitized = crate::analysis::redact_command(&params.command);
+                        let _ = self.record_audit_raw(
+                            &format!("gate-toctou-{}", uuid::Uuid::new_v4()),
+                            "GATE_TOCTOU_FINGERPRINT_MISMATCH",
+                            &format!(
+                                "Request: {}, Command: {}, Reason: Manifest/lockfile modified after approval (expected {}, found {})",
+                                params.request_id, sanitized, orig_fp, current_fp
+                            ),
+                            Severity::Critical,
+                        );
+                        return Err(ApprovalError::InvalidStateTransition(
+                            "Project manifest or lockfile modified after approval (TOCTOU violation)".to_string(),
+                        ));
+                    }
+                }
+            }
         }
 
         // Step 4: Dispatch to backend
@@ -646,12 +1003,24 @@ impl ExecutionGate {
         // Try in-process audit log
         if let Some(ref audit) = self.in_process_audit {
             let action = format!("GATE_{:?}", ctx.outcome);
+            let pkg_info = if let Some(pkg) = ctx.package_assessment {
+                format!(
+                    ", PkgMgr: {:?}, PkgOp: {:?}, Findings: {}, Fingerprint: {:?}",
+                    pkg.package_manager,
+                    pkg.operation,
+                    pkg.findings.len(),
+                    pkg.manifest_fingerprint.as_deref().unwrap_or("none")
+                )
+            } else {
+                String::new()
+            };
             let rationale = format!(
-                "Command: {}, Decision: {:?}, ExitCode: {:?}, Detail: {}",
+                "Command: {}, Decision: {:?}, ExitCode: {:?}, Detail: {}{}",
                 sanitized,
                 ctx.decision,
                 ctx.exit_code,
-                ctx.error_msg.unwrap_or_else(|| "none".to_string())
+                ctx.error_msg.unwrap_or_else(|| "none".to_string()),
+                pkg_info
             );
             if let Ok(rec) = audit.append(
                 &format!("gate-{}", uuid::Uuid::new_v4()),

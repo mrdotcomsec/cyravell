@@ -260,3 +260,64 @@ At the moment of `gate.dispatch_authorized`, the engine independently re-analyze
 - **In-Memory Token Lifetime:** Authorization tokens do not survive engine restarts.
 - **Root-Level Compromise:** If an attacker obtains root access on the host, they can kill the engine daemon or modify memory; Cyravell operates under the standard Unix unprivileged developer security model.
 
+---
+
+## 9. Pre-Installation Package Security Enforcement (Phase 2.5)
+
+### 9.1 Architectural Overview
+Phase 2.5 extends the authoritative Rust execution gate with pre-installation package security analysis (`engine/src/package/`). Before any package-manager command is dispatched, the gate statically parses the package invocation, inspects project manifests and lockfiles, queries a deterministic local advisory database, and enforces security policies without executing untrusted package scripts or build code.
+
+```
+Package Manager Command (e.g. npm install flatmap-stream@0.1.1)
+                            │
+                            ▼
+              1. AST Package Command Detector
+                 - Extracts ecosystem (npm, pnpm, yarn, pip, cargo)
+                 - Extracts operation (InstallAll, Add, Update, RunPackage)
+                 - Extracts package specifications and version constraints
+                 - Unwraps command wrappers (sudo, env, doas)
+                            │
+                            ▼
+              2. Manifest & Lockfile Inspector
+                 - Parses package.json, package-lock.json, Cargo.toml, Cargo.lock, requirements.txt
+                 - Computes SHA-256 fingerprint over manifest and lockfile
+                 - Validates lockfile integrity format (e.g. sha512-, sha256-)
+                 - Detects manifest-lockfile mismatches (unpinned or missing dependencies)
+                            │
+                            ▼
+              3. Local Advisory Database Evaluation
+                 - Offline, embedded fallback (`rules/package_advisories.json`)
+                 - SemVer & compound version range comparator (`>= 4.0.0, < 4.17.21`)
+                 - Queries direct requested packages and lockfile resolved dependencies
+                            │
+                            ▼
+              4. Authoritative Gate Policy Decision
+                 ├── MaliciousPackageFound ────► [HARD BLOCK] ────► Zero Backend Invocations (Non-overridable)
+                 ├── VulnerabilitiesFound ─────► [REQUIRE APPROVAL]
+                 ├── IntegrityMismatch ────────► [REQUIRE APPROVAL]
+                 ├── ManifestMismatch ─────────► [REQUIRE APPROVAL]
+                 ├── AssessmentFailed ─────────► [REQUIRE APPROVAL] (Fail-closed)
+                 └── CleanNoMatches ───────────► Proceed to Standard Command Policy (Does not imply "proven safe")
+                            │
+                            ▼
+              5. TOCTOU Protection at Dispatch
+                 - Recomputes manifest fingerprint before backend execute()
+                 - Fails closed if manifest or lockfile modified between approval and dispatch
+```
+
+### 9.2 Supported Package Managers and Manifest Formats
+- **npm / npx:** `package.json`, `package-lock.json` (v1, v2, v3).
+- **pnpm:** `pnpm-lock.yaml`.
+- **Yarn:** `yarn.lock`.
+- **pip / pip3 / python -m pip:** `requirements.txt` (including `-r` flags and PEP 440 constraints).
+- **Cargo:** `Cargo.toml`, `Cargo.lock` (including workspace root and member resolution).
+
+### 9.3 Local Advisory Database and Offline Guarantees
+- **Zero Network Dependency:** Package assessment runs completely offline using a local advisory database (`rules/package_advisories.json`) with an embedded compile-time fallback.
+- **Coverage Transparency:** Evaluates confirmed malicious packages (`flatmap-stream`, `cross-env.js`, `node-ipc`, `electorn`, `reqeusts`, etc.) and high-severity CVE vulnerabilities.
+- **No False Safety Claims:** A status of `CleanNoMatches` honestly conveys "no known match in local checked data", never presenting packages as "proven safe".
+
+### 9.4 TOCTOU Protection
+When an approval request is generated for a package operation requiring review, Cyravell computes and binds a SHA-256 `manifest_fingerprint` across the project manifest and lockfile. At the moment of `dispatch_authorized`, the gate re-evaluates the fingerprint: if project files were modified between approval and dispatch, the request is rejected immediately (`ApprovalError::InvalidStateTransition`).
+
+

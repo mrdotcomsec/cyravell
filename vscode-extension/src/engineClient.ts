@@ -34,6 +34,44 @@ export interface CommandAnalysisDetails {
   analysis_notes: string[];
 }
 
+export interface PackageSecurityFinding {
+  package_name: string;
+  version?: string;
+  advisory_id: string;
+  title: string;
+  severity: string;
+  is_malicious: boolean;
+  affected_range: string;
+  fixed_version?: string;
+  details: string;
+}
+
+export interface PackageAssessmentSummary {
+  package_manager: string;
+  operation: string;
+  status: string;
+  findings_count: number;
+  critical_count: number;
+  high_count: number;
+  malicious_count: number;
+  findings: PackageSecurityFinding[];
+  manifest_fingerprint?: string;
+}
+
+export interface PackageAssessmentResult {
+  package_manager: string;
+  operation: string;
+  status: string;
+  direct_packages: string[];
+  total_dependencies_scanned: number;
+  findings: PackageSecurityFinding[];
+  manifest_fingerprint?: string;
+  inspected_files: string[];
+  assessment_source: string;
+  offline_mode: boolean;
+  notes: string[];
+}
+
 export interface GateEvaluateResult {
   decision: 'ALLOW' | 'REQUIRE_APPROVAL' | 'BLOCK' | 'ANALYSIS_FAILED';
   outcome:
@@ -53,6 +91,7 @@ export interface GateEvaluateResult {
   audit_record_hash?: string;
   reason: string;
   allow_dispatch: boolean;
+  package_assessment?: PackageAssessmentResult;
 }
 
 export interface ApprovalRequestItem {
@@ -67,6 +106,8 @@ export interface ApprovalRequestItem {
   expires_at: string;
   status: string;
   decision_reason?: string;
+  package_details?: PackageAssessmentSummary;
+  manifest_fingerprint?: string;
 }
 
 export interface ApprovalDecideResult {

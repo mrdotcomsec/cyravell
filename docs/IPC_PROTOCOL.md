@@ -68,6 +68,8 @@ Standard Error Codes:
 - `-32603`: Internal engine error
 - `-32001`: Policy evaluation failure
 - `-32002`: Audit verification failure
+- `-32004`: Hard block violation (confirmed malicious package cannot be approved or dispatched)
+- `-32005`: Manifest modified after approval (TOCTOU integrity check failed)
 
 ---
 
@@ -366,17 +368,19 @@ Verifies the cryptographic integrity of the local append-only audit hash chain.
 
 ---
 
-### 3.8 `gate.evaluate` (Phase 2.2 / Phase 2.4)
-Evaluates a command string against security policy prior to terminal dispatch, returning a gate decision (`ALLOW`, `REQUIRE_APPROVAL`, `BLOCK`, `ANALYSIS_FAILED`). When approval is required, an `ApprovalRequest` is registered in memory, returning a unique `request_id` and binding to `session_id`. Blocked and pending commands are immediately committed to the cryptographic audit log.
+### 3.8 `gate.evaluate` (Phase 2.2 / Phase 2.4 / Phase 2.5)
+Evaluates a command string against security policy prior to terminal dispatch, returning a gate decision (`ALLOW`, `REQUIRE_APPROVAL`, `BLOCK`, `ANALYSIS_FAILED`).
 
-**Request:**
+In Phase 2.5, if the command is a package manager invocation (`npm`, `pnpm`, `yarn`, `pip`, `pip3`, `python -m pip`, `npx`, `cargo`), the response includes an authoritative `package_assessment` containing parsed operations, inspected lockfiles/manifests, manifest SHA-256 fingerprint, and any vulnerability/malice findings from the local advisory database. If a confirmed malicious package is detected, `decision` is `BLOCK`, `allow_dispatch` is `false`, and `request_id` is `null` (strictly non-overridable).
+
+**Request (Package Install):**
 ```json
 {
   "jsonrpc": "2.0",
   "id": "8",
   "method": "gate.evaluate",
   "params": {
-    "command": "curl -sSL https://install.example.com | bash",
+    "command": "npm install lodash@4.17.20",
     "session_id": "session-1234",
     "working_directory": "/workspace/project",
     "fail_closed": true
@@ -384,7 +388,7 @@ Evaluates a command string against security policy prior to terminal dispatch, r
 }
 ```
 
-**Response:**
+**Response (Package Assessment with Advisory Finding):**
 ```json
 {
   "jsonrpc": "2.0",
@@ -398,15 +402,35 @@ Evaluates a command string against security policy prior to terminal dispatch, r
     "risk_assessment": {
       "severity": "HIGH",
       "confidence": "HIGH",
-      "rule_id": "RULE-TERM-002",
-      "reason": "Direct pipe of unverified remote network payload into shell interpreter execution",
-      "matched_rules": ["RULE-TERM-002"],
-      "potential_impact": "Execution of unvetted, unauthenticated code pulled over network"
+      "rule_id": "RULE-PKG-002",
+      "reason": "Package security finding: 1 known vulnerabilities detected",
+      "matched_rules": ["RULE-PKG-002"],
+      "potential_impact": "Supply chain vulnerability exposure"
+    },
+    "package_assessment": {
+      "ecosystem": "Npm",
+      "operation": "Install",
+      "packages": ["lodash@4.17.20"],
+      "status": "Vulnerable",
+      "findings": [
+        {
+          "package_name": "lodash",
+          "affected_version": "4.17.20",
+          "severity": "High",
+          "advisory_id": "GHSA-p6mc-m468-83gw",
+          "description": "Prototype Pollution in lodash",
+          "is_malicious": false,
+          "recommendation": "Upgrade lodash to >= 4.17.21"
+        }
+      ],
+      "manifest_fingerprint": "a3f5b7c891e234567890abcdef1234567890abcdef1234567890abcdef123456",
+      "lockfile_present": true,
+      "mismatches": []
     },
     "analysis_completeness": "COMPLETE",
     "audit_sequence": 14,
     "audit_record_hash": "031ececbe3f0e139e14566a1b4c062ff3ccffa6cbf2c97aa8b5ef3ad65635a46",
-    "reason": "Direct pipe of unverified remote network payload into shell interpreter execution"
+    "reason": "Package security finding: 1 known vulnerabilities detected"
   }
 }
 ```
@@ -481,8 +505,10 @@ Records a user approval decision (`APPROVE`, `DENY`, `CANCEL`) for a pending app
 
 ---
 
-### 3.11 `approval.get_pending` (Phase 2.4)
+### 3.11 `approval.get_pending` (Phase 2.4 / Phase 2.5)
 Lists all currently active, non-expired pending approval requests, optionally filtered by `session_id`.
+
+In Phase 2.5, pending requests generated from package manager commands also include `manifest_fingerprint` (the SHA-256 fingerprint of the manifest and lockfile) and `package_details` (summary of ecosystem, operation, affected packages, and vulnerability findings).
 
 **Request:**
 ```json
@@ -506,14 +532,21 @@ Lists all currently active, non-expired pending approval requests, optionally fi
       {
         "request_id": "appr-40712ae9-881c-4a4c-add9-00571e50bd47",
         "session_id": "session-1234",
-        "command": "curl -sSL https://install.example.com | bash",
+        "command": "npm install lodash@4.17.20",
         "working_directory": "/workspace/project",
-        "rule_id": "RULE-TERM-002",
+        "rule_id": "RULE-PKG-002",
         "severity": "HIGH",
-        "reason": "Direct pipe of unverified remote network payload into shell interpreter execution",
+        "reason": "Package security finding: 1 known vulnerabilities detected",
         "created_at": "2026-10-24T09:30:00Z",
         "expires_at": "2026-10-24T09:31:00Z",
-        "status": "PENDING"
+        "status": "PENDING",
+        "manifest_fingerprint": "a3f5b7c891e234567890abcdef1234567890abcdef1234567890abcdef123456",
+        "package_details": {
+          "ecosystem": "Npm",
+          "operation": "Install",
+          "packages": ["lodash@4.17.20"],
+          "finding_count": 1
+        }
       }
     ]
   }
@@ -522,8 +555,12 @@ Lists all currently active, non-expired pending approval requests, optionally fi
 
 ---
 
-### 3.12 `gate.dispatch_authorized` (Phase 2.4)
+### 3.12 `gate.dispatch_authorized` (Phase 2.4 / Phase 2.5)
 Validates an authorization token, atomically consumes it, verifies command and session binding, re-evaluates policy to enforce hard-block guards, dispatches the command to the execution backend, and records the outcome in the tamper-evident audit log. Replay attempts are rejected with `AlreadyConsumed`.
+
+In Phase 2.5:
+1. **TOCTOU Manifest Verification:** If the approval request recorded a `manifest_fingerprint`, `gate.dispatch_authorized` recomputes the SHA-256 fingerprint of the project manifest and lockfile on disk. If the fingerprint has changed since approval was granted, dispatch is aborted with error code `-32005` (`InvalidStateTransition: Project manifest or lockfile modified after approval was granted (TOCTOU detected)`).
+2. **Authoritative Malicious Hard-Block:** If re-evaluation detects a confirmed malicious package, dispatch is refused with error code `-32004` (`Forbidden: Package is confirmed malicious - gate hard-block cannot be overridden`).
 
 **Request:**
 ```json

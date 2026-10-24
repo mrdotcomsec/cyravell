@@ -90,6 +90,9 @@ echo "  Engine daemon started (PID ${ENGINE_PID}) on socket ${TEST_SOCK}"
 # Test Phase 2.4 adversarial security validation and gate hardening over IPC
 "${ROOT_DIR}/target/debug/cyravell-test-harness" --socket-path "${TEST_SOCK}" test-adversarial-gate
 
+# Test Phase 2.5 package security enforcement over IPC
+"${ROOT_DIR}/target/debug/cyravell-test-harness" --socket-path "${TEST_SOCK}" test-package-gate
+
 # Test Phase 2.1 complex chains and operator awareness
 "${ROOT_DIR}/target/debug/cyravell-test-harness" --socket-path "${TEST_SOCK}" test-complex-chains
 
@@ -116,6 +119,13 @@ if "${ROOT_DIR}/target/debug/cyravell-engine" --socket-path "${TEST_SOCK}" exec 
   exit 1
 fi
 echo "  ✓ Destructive command blocked by execution gate (exit 126)"
+
+# Verify malicious package command is prevented by CLI gate (returns exit 126)
+if "${ROOT_DIR}/target/debug/cyravell-engine" --socket-path "${TEST_SOCK}" exec --command "npm install flatmap-stream@0.1.1" 2>/dev/null; then
+  echo "Error: Malicious package command was not blocked by execution gate!"
+  exit 1
+fi
+echo "  ✓ Malicious package command blocked by execution gate (exit 126)"
 
 # Clean shutdown
 "${ROOT_DIR}/target/debug/cyravell-engine" --socket-path "${TEST_SOCK}" stop

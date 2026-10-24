@@ -23,12 +23,13 @@ cleanup() {
 trap cleanup EXIT
 
 echo "╔══════════════════════════════════════════════════════════════╗"
-echo "║          Cyravell Phase 2.4: Adversarial Security &          ║"
-echo "║             Execution-Gate Hardening Demonstration           ║"
+echo "║          Cyravell Phase 2.5: Pre-Installation Package        ║"
+echo "║             Security Enforcement Demonstration               ║"
 echo "╚══════════════════════════════════════════════════════════════╝"
 echo ""
 
 echo "[Step 1] Starting Cyravell security engine daemon..."
+cargo build --workspace --quiet
 "${ROOT_DIR}/target/debug/cyravell-engine" start \
   --socket-path "${DEMO_SOCK}" \
   --data-dir "${DEMO_DATA}" \
@@ -105,17 +106,25 @@ echo "[Step 9] Demonstrating Phase 2.4 Adversarial Security Validation & Gate Ha
 "${ROOT_DIR}/target/debug/cyravell-test-harness" --socket-path "${DEMO_SOCK}" test-adversarial-gate
 echo ""
 
-echo "[Step 10] Verifying cryptographic audit log hash chain..."
+echo "[Step 10] Demonstrating Phase 2.5 Package Security Enforcement Gate..."
+echo "--- Testing pre-installation package security gate over IPC ---"
+"${ROOT_DIR}/target/debug/cyravell-test-harness" --socket-path "${DEMO_SOCK}" test-package-gate
+echo ""
+echo "--- Testing CLI gate interception of malicious package ---"
+"${ROOT_DIR}/target/debug/cyravell-engine" --socket-path "${DEMO_SOCK}" exec --command "npm install flatmap-stream@0.1.1" || true
+echo ""
+
+echo "[Step 11] Verifying cryptographic audit log hash chain..."
 "${ROOT_DIR}/target/debug/cyravell-engine" verify-audit \
   --audit-file "${DEMO_DATA}/audit.log"
 echo ""
 
-echo "[Step 11] Demonstrating tamper detection on disposable audit log copy..."
+echo "[Step 12] Demonstrating tamper detection on disposable audit log copy..."
 "${ROOT_DIR}/target/debug/cyravell-test-harness" --socket-path "${DEMO_SOCK}" \
   test-tamper-detection
 echo ""
 
-echo "[Step 12] Orderly engine shutdown..."
+echo "[Step 13] Orderly engine shutdown..."
 "${ROOT_DIR}/target/debug/cyravell-engine" --socket-path "${DEMO_SOCK}" stop
 wait "${ENGINE_PID}" 2>/dev/null || true
 unset ENGINE_PID
@@ -126,5 +135,5 @@ echo "--- Testing Fail-Closed enforcement when engine is offline ---"
 echo ""
 
 echo "══════════════════════════════════════════════════════════════"
-echo "  Phase 2.4 demonstration completed successfully!"
+echo "  Phase 2.5 demonstration completed successfully!"
 echo "══════════════════════════════════════════════════════════════"
