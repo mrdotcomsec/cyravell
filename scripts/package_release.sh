@@ -146,6 +146,22 @@ else
   GIT_TAG="$(git -C "${ROOT_DIR}" describe --tags --exact-match 2>/dev/null || echo "v${RELEASE_VERSION}-dev")"
   KEY_ID="cyravell-dev-test-2026"
   SIGNING_MODE="development"
+
+  # Require development signing key in environment (no hardcoded fallback)
+  DEV_KEY_TRIMMED="$(echo "${CYRAVELL_DEV_RELEASE_SIGNING_KEY:-}" | tr -d '[:space:]')"
+  if [ -z "${DEV_KEY_TRIMMED}" ]; then
+    echo "✗ CRITICAL ERROR: CYRAVELL_DEV_RELEASE_SIGNING_KEY environment variable is not set or empty!"
+    echo "  Development release packaging requires a development signing key."
+    echo "  No default private key is hardcoded or committed in scripts."
+    echo ""
+    echo "  To provide a development signing key, export the environment variable:"
+    echo "    export CYRAVELL_DEV_RELEASE_SIGNING_KEY=\"<64-hex-ed25519-seed>\""
+    echo ""
+    echo "  For local development and testing matching 'cyravell-dev-test-2026' in"
+    echo "  rules/release_signing_keys.json, supply the development test key seed."
+    echo "  (For official production releases, pass --official and supply CYRAVELL_RELEASE_SIGNING_KEY)."
+    exit 1
+  fi
 fi
 
 # Clean and prepare dist directory
@@ -186,15 +202,12 @@ mkdir -p "${VSIX_STAGING}/extension"
 cp -r "${ROOT_DIR}/vscode-extension/out" "${VSIX_STAGING}/extension/"
 cp -r "${ROOT_DIR}/vscode-extension/media" "${VSIX_STAGING}/extension/"
 cp "${ROOT_DIR}/vscode-extension/package.json" "${VSIX_STAGING}/extension/"
-
-# If existing .vsix exists, extract metadata XMLs for OPC compatibility
-if [ -f "${ROOT_DIR}/vscode-extension/cyravell-0.1.0.vsix" ]; then
-  unzip -q -o "${ROOT_DIR}/vscode-extension/cyravell-0.1.0.vsix" "extension.vsixmanifest" "[Content_Types].xml" -d "${VSIX_STAGING}/" 2>/dev/null || true
+if [ -f "${ROOT_DIR}/vscode-extension/README.md" ]; then
+  cp "${ROOT_DIR}/vscode-extension/README.md" "${VSIX_STAGING}/extension/"
 fi
 
-# Ensure [Content_Types].xml exists
-if [ ! -f "${VSIX_STAGING}/[Content_Types].xml" ]; then
-  cat <<'EOF' > "${VSIX_STAGING}/[Content_Types].xml"
+# Ensure [Content_Types].xml exists with full MIME mappings including markdown
+cat <<'EOF' > "${VSIX_STAGING}/[Content_Types].xml"
 <?xml version="1.0" encoding="utf-8"?>
 <Types xmlns="http://schemas.openxmlformats.org/package/2006/content-types">
   <Default Extension="json" ContentType="application/json" />
@@ -202,19 +215,32 @@ if [ ! -f "${VSIX_STAGING}/[Content_Types].xml" ]; then
   <Default Extension="js" ContentType="application/javascript" />
   <Default Extension="svg" ContentType="image/svg+xml" />
   <Default Extension="png" ContentType="image/png" />
+  <Default Extension="md" ContentType="text/markdown" />
 </Types>
 EOF
-fi
 
-# Ensure extension.vsixmanifest exists
-if [ ! -f "${VSIX_STAGING}/extension.vsixmanifest" ]; then
-  cat <<EOF > "${VSIX_STAGING}/extension.vsixmanifest"
+# Ensure extension.vsixmanifest exists with complete OPC assets
+cat <<EOF > "${VSIX_STAGING}/extension.vsixmanifest"
 <?xml version="1.0" encoding="utf-8"?>
-<PackageManifest Version="2.0.0" xmlns="http://schemas.microsoft.com/developer/vsx-schema/2011">
+<PackageManifest Version="2.0.0" xmlns="http://schemas.microsoft.com/developer/vsx-schema/2011" xmlns:d="http://schemas.microsoft.com/developer/vsx-schema-design/2011">
   <Metadata>
     <Identity Id="cyravell" Version="${RELEASE_VERSION}" Language="en-US" Publisher="cyravell" />
     <DisplayName>Cyravell</DisplayName>
-    <Description>Local-first security monitoring system for AI coding agents</Description>
+    <Description xml:space="preserve">Local-first security monitoring system for AI coding agents</Description>
+    <Categories>Security,Other</Categories>
+    <GalleryFlags>Public</GalleryFlags>
+    <Properties>
+      <Property Id="Microsoft.VisualStudio.Code.Engine" Value="^1.80.0" />
+      <Property Id="Microsoft.VisualStudio.Code.ExtensionDependencies" Value="" />
+      <Property Id="Microsoft.VisualStudio.Code.ExtensionPack" Value="" />
+      <Property Id="Microsoft.VisualStudio.Code.ExtensionKind" Value="workspace" />
+      <Property Id="Microsoft.VisualStudio.Code.LocalizedLanguages" Value="" />
+      <Property Id="Microsoft.VisualStudio.Code.EnabledApiProposals" Value="" />
+      <Property Id="Microsoft.VisualStudio.Code.ExecutesCode" Value="true" />
+      <Property Id="Microsoft.VisualStudio.Services.GitHubFlavoredMarkdown" Value="true" />
+      <Property Id="Microsoft.VisualStudio.Services.Content.Pricing" Value="Free" />
+    </Properties>
+    <Icon>extension/media/icon.png</Icon>
   </Metadata>
   <Installation>
     <InstallationTarget Id="Microsoft.VisualStudio.Code"/>
@@ -222,10 +248,11 @@ if [ ! -f "${VSIX_STAGING}/extension.vsixmanifest" ]; then
   <Dependencies/>
   <Assets>
     <Asset Type="Microsoft.VisualStudio.Code.Manifest" Path="extension/package.json" Addressable="true" />
+    <Asset Type="Microsoft.VisualStudio.Services.Content.Details" Path="extension/README.md" Addressable="true" />
+    <Asset Type="Microsoft.VisualStudio.Services.Icons.Default" Path="extension/media/icon.png" Addressable="true" />
   </Assets>
 </PackageManifest>
 EOF
-fi
 
 # Normalize timestamps in staging
 find "${VSIX_STAGING}" -exec touch -d "2026-01-01 00:00:00 UTC" {} +
@@ -274,11 +301,10 @@ if [ "${BUILD_MODE}" = "official" ]; then
     --output "${DIST_DIR}/release_manifest.json"
   echo "  ✓ Signed manifest using official publisher key from environment"
 else
-  DEV_TEST_KEY_HEX="1008694a11eaa7aeed52e7e6ba15d21385cbbf51cc2ed6fe1ef620d028e296c4"
   "${ROOT_DIR}/target/release/cyravell-engine" sign-release-manifest \
     --manifest "${DIST_DIR}/release_manifest.json" \
     --key-id "${KEY_ID}" \
-    --secret-key-hex "${DEV_TEST_KEY_HEX}" \
+    --secret-key-hex "${DEV_KEY_TRIMMED}" \
     --signing-mode "${SIGNING_MODE}" \
     --output "${DIST_DIR}/release_manifest.json"
   echo "  ✓ Signed manifest using development/test keypair"

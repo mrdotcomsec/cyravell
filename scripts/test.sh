@@ -37,6 +37,7 @@ node -e '
   client.connect().then(connected => {
     assert.strictEqual(connected, false, "Must return false when engine is offline");
     assert.strictEqual(client.getConnectionState(), "DISCONNECTED", "State must remain DISCONNECTED");
+    client.disconnect();
     console.log("  ✓ Extension client disconnected-state verified");
   }).catch(e => { console.error(e); process.exit(1); });
 '
@@ -166,7 +167,34 @@ echo "[5/7] Running Phase 3.0 software supply-chain audit..."
 # 6. Phase 3.1: Release Packaging, Independent Verification & Trust Chain
 echo ""
 echo "[6/7] Testing Phase 3.1 release packaging, independent verification & trust chain..."
+
+# 6a. Verify packaging fails closed when CYRAVELL_DEV_RELEASE_SIGNING_KEY is missing
+echo "  Testing package_release.sh fails closed when CYRAVELL_DEV_RELEASE_SIGNING_KEY is unset..."
+MISSING_KEY_OUTPUT="$(env -u CYRAVELL_DEV_RELEASE_SIGNING_KEY "${ROOT_DIR}/scripts/package_release.sh" --dev "0.1.0" 2>&1 || true)"
+if echo "${MISSING_KEY_OUTPUT}" | grep -q "CYRAVELL_DEV_RELEASE_SIGNING_KEY environment variable is not set or empty"; then
+  echo "  ✓ Missing development signing key correctly failed closed with descriptive error"
+else
+  echo "✗ Error: Expected missing development key to fail closed, got:"
+  echo "${MISSING_KEY_OUTPUT}"
+  exit 1
+fi
+
+# 6b. Verify packaging fails closed when CYRAVELL_DEV_RELEASE_SIGNING_KEY is empty string
+echo "  Testing package_release.sh fails closed when CYRAVELL_DEV_RELEASE_SIGNING_KEY is whitespace/empty..."
+EMPTY_KEY_OUTPUT="$(CYRAVELL_DEV_RELEASE_SIGNING_KEY="   " "${ROOT_DIR}/scripts/package_release.sh" --dev "0.1.0" 2>&1 || true)"
+if echo "${EMPTY_KEY_OUTPUT}" | grep -q "CYRAVELL_DEV_RELEASE_SIGNING_KEY environment variable is not set or empty"; then
+  echo "  ✓ Whitespace/empty development signing key correctly failed closed with descriptive error"
+else
+  echo "✗ Error: Expected empty development key to fail closed, got:"
+  echo "${EMPTY_KEY_OUTPUT}"
+  exit 1
+fi
+
+# 6c. Verify packaging succeeds when CYRAVELL_DEV_RELEASE_SIGNING_KEY is explicitly supplied
+echo "  Testing package_release.sh succeeds when CYRAVELL_DEV_RELEASE_SIGNING_KEY is explicitly supplied..."
+CYRAVELL_DEV_RELEASE_SIGNING_KEY="1008694a11eaa7aeed52e7e6ba15d21385cbbf51cc2ed6fe1ef620d028e296c4" \
 "${ROOT_DIR}/scripts/package_release.sh" --dev "0.1.0"
+echo "  ✓ Development release packaged and signed successfully with supplied key"
 
 echo "  Testing independent standalone verifier (zero binary execution)..."
 python3 "${ROOT_DIR}/scripts/standalone_verify.py" \

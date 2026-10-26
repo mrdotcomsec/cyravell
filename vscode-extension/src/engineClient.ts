@@ -421,6 +421,9 @@ export class EngineClient extends EventEmitter {
         }
       }
     }, 2500);
+    if (this.reconnectInterval && typeof this.reconnectInterval.unref === 'function') {
+      this.reconnectInterval.unref();
+    }
   }
 
   public stopAutoReconnect() {
@@ -469,6 +472,9 @@ export class EngineClient extends EventEmitter {
         }
       }
     }, 3000);
+    if (this.pollInterval && typeof this.pollInterval.unref === 'function') {
+      this.pollInterval.unref();
+    }
   }
 
   private stopPolling() {

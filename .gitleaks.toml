@@ -1,0 +1,16 @@
+# Gitleaks configuration for Cyravell
+# Narrow, documented allowlist for synthetic test fixtures and development keys.
+# Does NOT disable any secret scanning rules globally.
+
+title = "Cyravell Gitleaks Configuration"
+
+[allowlist]
+description = "Documented synthetic test fixtures and development-only signing keys"
+regexes = [
+  # Synthetic token in update_tests.rs specifically used to test secret redaction in audit logs
+  '''ghp_1234567890abcdef1234567890abcdef123456''',
+  # Development test keypair for non-production packaging (is_official: false in registry)
+  '''1008694a11eaa7aeed52e7e6ba15d21385cbbf51cc2ed6fe1ef620d028e296c4''',
+  # Historical superseded test key in commit 9d6741b (Phase 3.0 dev key, replaced in Phase 3.1)
+  '''071992afb145397fb4706bf1f6e4dc5ca0ac5dc75fa094758f66e0b4cb413ab8''',
+]
