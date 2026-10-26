@@ -498,6 +498,44 @@ Cyravell's engine verifies operating system identity and filesystem security inv
   - **Cause:** Insecure permissions or symlink attack detected in the socket directory hierarchy.
   - **Resolution:** Create a dedicated private directory: `mkdir -p ~/.local/share/cyravell && chmod 700 ~/.local/share/cyravell`.
 
+---
+
+## 14. Phase 3.0: Release Verification & Software Supply-Chain Setup
+
+### 14.1 Verifying an Official Cyravell Release Package
+Before installing binaries or extensions, always verify the cryptographic signature and bit-for-bit file digests:
+```bash
+# 1. Run the official verification script
+./scripts/verify_release.sh /path/to/cyravell-release-v0.1.0 0.1.0
+
+# 2. Or verify directly using cyravell-engine
+cyravell-engine verify-release \
+  --manifest /path/to/cyravell-release-v0.1.0/release_manifest.json \
+  --artifacts-dir /path/to/cyravell-release-v0.1.0 \
+  --expected-version 0.1.0
+```
+
+### 14.2 Generating Release Deliverables Locally
+To package reproducible release deliverables from a clean checkout:
+```bash
+# Packages binaries, .vsix, rules bundle, SPDX 2.3 SBOM, and signed release manifest
+./scripts/package_release.sh 0.1.0
+```
+Outputs are placed in `dist/release-v0.1.0/` alongside `release_manifest.json`, `release_manifest.json.sig`, and `SHA256SUMS`.
+
+### 14.3 Running the Dependency & Supply-Chain Audit
+To audit lockfiles, third-party dependencies, and check against package advisories:
+```bash
+./scripts/audit_dependencies.sh
+```
+
+### 14.4 Troubleshooting Release Verification Failures
+- **Status: `TamperedArtifact`:** One or more files in the release directory have a byte size or SHA-256 digest differing from the publisher's signed manifest. Do **NOT** execute the artifacts. Re-download from an authentic channel.
+- **Status: `InvalidSignature`:** The manifest content has been modified after signing, or was signed by an unrecognized key. Check that `rules/release_signing_keys.json` contains the publisher's active key.
+- **Status: `MissingArtifact`:** A required deliverable (such as `cyravell-sbom.spdx.json` or `.vsix`) was omitted from the release archive.
+- **Status: `SecurityCheckFailed`:** A path traversal sequence (`..` or `/`) was detected in an artifact name. This indicates an invalid or adversarial manifest.
+
+
 
 
 

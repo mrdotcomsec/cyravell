@@ -248,3 +248,30 @@ We classify potential threat actors into the following tiers:
 - **Phase 2:** PTY / Pre-exec shell interception wrappers and eBPF file monitor adapters.
 - **Phase 3:** Ed25519-signed audit checkpoints and optional external tamper-evident notarization.
 - **Phase 4:** Sandboxed AI secondary risk analyzer isolated behind deterministic safety gates.
+
+---
+
+## 10. Software Supply-Chain & Release Integrity Threats (Phase 3.0)
+
+Phase 3.0 addresses software supply-chain threats targeting Cyravell's release and installation pipeline:
+
+### 10.1 Threat Taxonomy & Mitigations
+1. **Dependency Drift & Insecure Resolution:**
+   - *Threat:* Floating version constraints pull in an unreviewed or compromised transitive dependency during automated builds.
+   - *Mitigation:* Committed `Cargo.lock` and `package-lock.json` enforced via `cargo check --locked` and `npm ci --ignore-scripts`. Zero floating wildcards (`version = "*"`) permitted.
+2. **Third-Party Action Hijacking (CI/CD):**
+   - *Threat:* An attacker compromises a GitHub Action or mutable tag (`@v4`) used in CI workflows.
+   - *Mitigation:* All actions are pinned to immutable 40-character commit SHAs with explicit version comments.
+3. **Artifact Substitution & MitM Distribution:**
+   - *Threat:* An attacker tampers with a downloaded binary or `.vsix` archive in transit.
+   - *Mitigation:* Canonical `release_manifest.json` cataloging exact byte lengths and SHA-256 digests, authenticated with detached Ed25519 signatures. Verification fails closed on mismatch.
+4. **Key Role Confusion & Privilege Creep:**
+   - *Threat:* Threat advisory signing keys are repurposed to sign binary releases, or vice-versa.
+   - *Mitigation:* Cryptographic domain separation between `ReleaseKeyStore` and `TrustedKeyStore`. Distinct keys, distinct trust files, and mutual rejection of foreign key roles.
+5. **Path Traversal via Malicious Manifest:**
+   - *Threat:* A compromised manifest uses relative paths (`../../../bin/evil`) to overwrite system binaries during verification.
+   - *Mitigation:* Manifest parser strictly rejects any artifact filename containing `..`, leading `/`, backslashes, or null bytes (`ReleaseStatus::SecurityCheckFailed`).
+6. **Reproducibility Verification:**
+   - *Threat:* Inability to verify whether a distributed binary was compiled from reviewed source revision.
+   - *Mitigation:* Bit-for-bit identical compilation achieved via `--remap-path-prefix` and `SOURCE_DATE_EPOCH`; deterministic ZIP packaging for `.vsix`. Full machine-readable SPDX 2.3 SBOM generated with package-manager PURLs.
+

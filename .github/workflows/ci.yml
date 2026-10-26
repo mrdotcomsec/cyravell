@@ -1,0 +1,114 @@
+name: Cyravell CI Pipeline
+
+on:
+  push:
+    branches: [ master, main ]
+  pull_request:
+    branches: [ master, main ]
+
+permissions:
+  contents: read
+
+jobs:
+  security-audit:
+    name: Dependency & Software Supply-Chain Audit
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout Source Code
+        # Pinned to v4.1.1 commit SHA
+        uses: actions/checkout@b4ffde65f46336ab88eb53be808477a3936bae11
+
+      - name: Setup Rust Toolchain
+        # Pinned to master commit SHA (2024-03)
+        uses: dtolnay/rust-toolchain@7b7640457d930a38d9bda16020914e66cf17f65a
+        with:
+          toolchain: 1.80.0
+
+      - name: Setup Node.js Environment
+        # Pinned to v4.0.2 commit SHA
+        uses: actions/setup-node@60edb5dd545a775178f52524783378180af0d1f8
+        with:
+          node-version: 18
+
+      - name: Run Software Supply-Chain Audit
+        run: ./scripts/audit_dependencies.sh
+
+  rust-quality-and-tests:
+    name: Rust Code Quality, Lints & Subsystem Tests
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout Source Code
+        # Pinned to v4.1.1 commit SHA
+        uses: actions/checkout@b4ffde65f46336ab88eb53be808477a3936bae11
+
+      - name: Setup Rust Toolchain
+        # Pinned to master commit SHA (2024-03)
+        uses: dtolnay/rust-toolchain@7b7640457d930a38d9bda16020914e66cf17f65a
+        with:
+          toolchain: 1.80.0
+          components: rustfmt, clippy
+
+      - name: Check Formatting
+        run: cargo fmt --check
+
+      - name: Check Compilation (--locked)
+        run: cargo check --locked --workspace
+
+      - name: Static Analysis (Clippy -D warnings)
+        run: cargo clippy --workspace -- -D warnings
+
+      - name: Run Rust Tests (Workspace)
+        run: cargo test --workspace -- --nocapture
+
+  extension-tests:
+    name: VS Code Extension Quality & Tests
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout Source Code
+        # Pinned to v4.1.1 commit SHA
+        uses: actions/checkout@b4ffde65f46336ab88eb53be808477a3936bae11
+
+      - name: Setup Node.js Environment
+        # Pinned to v4.0.2 commit SHA
+        uses: actions/setup-node@60edb5dd545a775178f52524783378180af0d1f8
+        with:
+          node-version: 18
+
+      - name: Install Extension Dependencies (--ignore-scripts)
+        run: |
+          cd vscode-extension
+          npm ci --ignore-scripts
+
+      - name: Compile Extension TypeScript
+        run: |
+          cd vscode-extension
+          npm run compile
+
+      - name: Run Extension Unit Tests
+        run: |
+          cd vscode-extension
+          npm test
+
+  integration-e2e:
+    name: End-to-End Vertical Slice & Gate Tests
+    runs-on: ubuntu-latest
+    needs: [security-audit, rust-quality-and-tests, extension-tests]
+    steps:
+      - name: Checkout Source Code
+        # Pinned to v4.1.1 commit SHA
+        uses: actions/checkout@b4ffde65f46336ab88eb53be808477a3936bae11
+
+      - name: Setup Rust Toolchain
+        # Pinned to master commit SHA (2024-03)
+        uses: dtolnay/rust-toolchain@7b7640457d930a38d9bda16020914e66cf17f65a
+        with:
+          toolchain: 1.80.0
+
+      - name: Setup Node.js Environment
+        # Pinned to v4.0.2 commit SHA
+        uses: actions/setup-node@60edb5dd545a775178f52524783378180af0d1f8
+        with:
+          node-version: 18
+
+      - name: Run Complete Integration Pipeline
+        run: ./scripts/test.sh

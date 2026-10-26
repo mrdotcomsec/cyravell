@@ -20,7 +20,12 @@ use cyravell_engine::{
         AdvisoryBundle, AdvisoryDatabase, AdvisoryUpdater, BaselineStore, PackageSecurityAssessor,
         TrustedKeyStore,
     },
+    release::{
+        generate_release_manifest, verify_release_package, CyravellReleaseManifest,
+        ReleaseKeyStore, ReleaseStatus,
+    },
 };
+use ed25519_dalek::SigningKey;
 
 #[derive(Parser)]
 #[command(name = "cyravell-engine")]
@@ -60,6 +65,64 @@ enum Commands {
 
         #[arg(short, long)]
         base_dir: PathBuf,
+    },
+    /// Verify a complete Cyravell release package against release manifest and trusted keys
+    VerifyRelease {
+        #[arg(short, long)]
+        manifest: PathBuf,
+
+        #[arg(short, long)]
+        artifacts_dir: PathBuf,
+
+        #[arg(short, long)]
+        keys_file: Option<PathBuf>,
+
+        #[arg(long)]
+        expected_version: Option<String>,
+
+        #[arg(long)]
+        expected_commit: Option<String>,
+
+        #[arg(long)]
+        json: bool,
+    },
+    /// Generate a release manifest by inspecting build deliverables in artifacts directory
+    GenerateReleaseManifest {
+        #[arg(short, long)]
+        artifacts_dir: PathBuf,
+
+        #[arg(short, long)]
+        release_version: String,
+
+        #[arg(short, long)]
+        commit: String,
+
+        #[arg(short, long)]
+        tag: Option<String>,
+
+        #[arg(long, default_value = "x86_64-unknown-linux-gnu")]
+        target_platform: String,
+
+        #[arg(long, default_value = "cyravell-sbom.spdx.json")]
+        sbom: String,
+
+        #[arg(short, long)]
+        output: PathBuf,
+    },
+    /// Cryptographically sign a release manifest with an Ed25519 signing key
+    SignReleaseManifest {
+        #[arg(short, long)]
+        manifest: PathBuf,
+
+        #[arg(short, long)]
+        key_id: String,
+
+        /// 32-byte Ed25519 secret key in hex format (or set CYRAVELL_RELEASE_SIGNING_KEY)
+        #[arg(short, long)]
+        secret_key_hex: Option<String>,
+
+        #[arg(short, long)]
+        output: Option<PathBuf>,
     },
     /// Query status of a running engine instance
     Status,
@@ -257,6 +320,195 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 }
                 std::process::exit(1);
             }
+        }
+
+        Commands::VerifyRelease {
+            manifest,
+            artifacts_dir,
+            keys_file,
+            expected_version,
+            expected_commit,
+            json,
+        } => {
+            let keystore = match keys_file {
+                Some(ref kpath) => match ReleaseKeyStore::load_from_path(kpath) {
+                    Ok(ks) => ks,
+                    Err(e) => {
+                        eprintln!(
+                            "Failed to load release keys from {}: {}",
+                            kpath.display(),
+                            e
+                        );
+                        std::process::exit(1);
+                    }
+                },
+                None => ReleaseKeyStore::load_default(),
+            };
+
+            let report = verify_release_package(
+                &manifest,
+                &artifacts_dir,
+                &keystore,
+                expected_version.as_deref(),
+                expected_commit.as_deref(),
+            );
+
+            if json {
+                println!("{}", serde_json::to_string_pretty(&report)?);
+            } else {
+                println!("══════════════════════════════════════════════════════════════");
+                println!("             Cyravell Release Package Verification            ");
+                println!("══════════════════════════════════════════════════════════════");
+                println!("Status:                 {:?}", report.status);
+                println!("Product:                {}", report.product_name);
+                println!("Release Version:        {}", report.release_version);
+                println!("Source Commit:          {}", report.source_commit);
+                println!(
+                    "Signing Key ID:         {}",
+                    report.signing_key_id.as_deref().unwrap_or("none")
+                );
+                println!(
+                    "Publisher:              {}",
+                    report.publisher.as_deref().unwrap_or("unauthenticated")
+                );
+                println!(
+                    "Verified Artifacts:     {}",
+                    report.verified_artifacts_count
+                );
+                println!("Details:                {}", report.details);
+
+                if !report.mismatched_artifacts.is_empty() {
+                    eprintln!("\nTampered / Mismatched Artifacts:");
+                    for m in &report.mismatched_artifacts {
+                        eprintln!("  ✗ {}", m);
+                    }
+                }
+
+                if !report.missing_artifacts.is_empty() {
+                    eprintln!("\nMissing Artifacts:");
+                    for m in &report.missing_artifacts {
+                        eprintln!("  ✗ {}", m);
+                    }
+                }
+
+                if !report.unlisted_artifacts.is_empty() {
+                    println!("\nUnlisted Files in Release Directory (Informational):");
+                    for u in &report.unlisted_artifacts {
+                        println!("  ? {}", u);
+                    }
+                }
+
+                if !report.errors.is_empty() {
+                    eprintln!("\nVerification Errors:");
+                    for e in &report.errors {
+                        eprintln!("  ✗ {}", e);
+                    }
+                }
+                println!("══════════════════════════════════════════════════════════════");
+            }
+
+            if report.status != ReleaseStatus::Verified {
+                std::process::exit(1);
+            }
+        }
+
+        Commands::GenerateReleaseManifest {
+            artifacts_dir,
+            release_version,
+            commit,
+            tag,
+            target_platform,
+            sbom,
+            output,
+        } => {
+            let manifest = match generate_release_manifest(
+                &artifacts_dir,
+                &release_version,
+                &commit,
+                tag.as_deref(),
+                &target_platform,
+                &sbom,
+            ) {
+                Ok(m) => m,
+                Err(e) => {
+                    eprintln!("Failed to generate release manifest: {}", e);
+                    std::process::exit(1);
+                }
+            };
+
+            let json_str = serde_json::to_string_pretty(&manifest)?;
+            std::fs::write(&output, json_str)?;
+            println!(
+                "Successfully generated release manifest: {} ({} artifacts enumerated)",
+                output.display(),
+                manifest.artifacts.len()
+            );
+        }
+
+        Commands::SignReleaseManifest {
+            manifest,
+            key_id,
+            secret_key_hex,
+            output,
+        } => {
+            let key_hex = match secret_key_hex {
+                Some(k) => k,
+                None => match std::env::var("CYRAVELL_RELEASE_SIGNING_KEY") {
+                    Ok(k) => k,
+                    Err(_) => {
+                        eprintln!("Error: Secret key must be provided via --secret-key-hex or CYRAVELL_RELEASE_SIGNING_KEY environment variable");
+                        std::process::exit(1);
+                    }
+                },
+            };
+
+            let key_bytes = match hex::decode(key_hex.trim()) {
+                Ok(b) => b,
+                Err(e) => {
+                    eprintln!("Invalid secret key hex encoding: {}", e);
+                    std::process::exit(1);
+                }
+            };
+
+            if key_bytes.len() != 32 {
+                eprintln!(
+                    "Secret key must be 32 bytes (got {} bytes)",
+                    key_bytes.len()
+                );
+                std::process::exit(1);
+            }
+
+            let key_arr: [u8; 32] = match key_bytes.try_into() {
+                Ok(arr) => arr,
+                Err(_) => {
+                    eprintln!("Slice conversion error for secret key");
+                    std::process::exit(1);
+                }
+            };
+
+            let signing_key = SigningKey::from_bytes(&key_arr);
+
+            let content = std::fs::read_to_string(&manifest)?;
+            let mut rel_manifest: CyravellReleaseManifest = serde_json::from_str(&content)?;
+
+            rel_manifest.sign(&signing_key, &key_id);
+
+            let out_path = output.unwrap_or(manifest);
+            let updated_json = serde_json::to_string_pretty(&rel_manifest)?;
+            std::fs::write(&out_path, &updated_json)?;
+
+            // Also write detached signature file
+            let sig_file = PathBuf::from(format!("{}.sig", out_path.display()));
+            if let Some(ref sig) = rel_manifest.signature {
+                std::fs::write(&sig_file, format!("{}\n", sig))?;
+            }
+
+            println!(
+                "Successfully signed release manifest: {} (Key ID: '{}', Detached signature: {})",
+                out_path.display(),
+                key_id,
+                sig_file.display()
+            );
         }
 
         Commands::Status => {

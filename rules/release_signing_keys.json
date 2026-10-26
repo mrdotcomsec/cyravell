@@ -1,0 +1,14 @@
+{
+  "schema_version": "1.0",
+  "keys": [
+    {
+      "key_id": "cyravell-release-official-2026",
+      "publisher": "Cyravell Core Release Authority",
+      "public_key_hex": "c715e8fb37fa48695899660b5668f0070c481e04879060177efb256b1d64c02e",
+      "algorithm": "ed25519",
+      "created_at": "2026-01-01T00:00:00Z",
+      "expires_at": null,
+      "is_active": true
+    }
+  ]
+}

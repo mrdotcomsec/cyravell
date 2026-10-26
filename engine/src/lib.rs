@@ -10,9 +10,12 @@ pub mod ipc;
 pub mod model;
 pub mod package;
 pub mod policy;
+pub mod release;
 
 #[cfg(test)]
 mod ipc_auth_tests;
+#[cfg(test)]
+mod release_tests;
 
 pub use analysis::CommandAnalyzer;
 pub use audit::AuditLog;
@@ -32,3 +35,8 @@ pub use package::{
     PackageSecurityConfig, PostOperationVerifier, TrustedKeyStore, WorkspaceMonitor,
 };
 pub use policy::PolicyEngine;
+pub use release::{
+    generate_release_manifest, verify_release_package, BuildMetadata, CyravellReleaseManifest,
+    ReleaseArtifact, ReleaseKey, ReleaseKeyError, ReleaseKeyStore, ReleaseStatus,
+    ReleaseVerificationReport, SbomReference,
+};
