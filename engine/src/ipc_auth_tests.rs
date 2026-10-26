@@ -935,4 +935,52 @@ mod tests {
         assert_eq!(handle.backend.invocation_count(), 0);
         assert!(handle.backend.commands_executed().is_empty());
     }
+
+    // -------------------------------------------------------------------------
+    // 17. Gate evaluations populate recent events and appear in event.get_recent
+    // -------------------------------------------------------------------------
+    #[test]
+    fn test_17_gate_evaluations_populate_recent_events_and_appear_in_event_get_recent() {
+        let handle = setup_server(IpcAuthPolicy::same_user_only());
+
+        // 1. Evaluate destructive command through gate
+        let eval_resp = send_rpc(
+            &handle.socket_path,
+            "gate.evaluate",
+            Some(serde_json::json!({
+                "command": "rm -rf /",
+                "session_id": "test-session-recent",
+                "fail_closed": true
+            })),
+        )
+        .unwrap();
+
+        assert!(eval_resp.result.is_some());
+        let eval_res: GateEvaluateResult =
+            serde_json::from_value(eval_resp.result.unwrap()).unwrap();
+        assert_eq!(eval_res.decision, GateDecision::Block);
+
+        // 2. Query event.get_recent over IPC socket
+        let recent_resp = send_rpc(
+            &handle.socket_path,
+            "event.get_recent",
+            Some(serde_json::json!({ "limit": 10 })),
+        )
+        .unwrap();
+
+        assert!(recent_resp.result.is_some());
+        let recent_res: RecentEventsResult =
+            serde_json::from_value(recent_resp.result.unwrap()).unwrap();
+
+        // 3. Verify event is present in recent events feed
+        assert!(!recent_res.events.is_empty());
+        let latest = &recent_res.events[0];
+        assert_eq!(latest.assessment.severity, Severity::Critical);
+        assert_eq!(latest.assessment.rule_id, "RULE-TERM-001");
+        assert_eq!(
+            latest.event.execution_status,
+            ExecutionStatus::BlockedConfirmed
+        );
+        assert_eq!(latest.event.source_adapter, "controlled_execution_gate");
+    }
 }

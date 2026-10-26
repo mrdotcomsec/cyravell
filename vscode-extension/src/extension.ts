@@ -22,8 +22,84 @@ export function activate(context: vscode.ExtensionContext) {
   context.subscriptions.push(statusBarItem);
   updateStatusBar();
 
-  client.on('stateChanged', () => updateStatusBar());
-  client.on('updated', () => updateStatusBar());
+  const notifiedEventIds = new Set<string>();
+  let isInitialLoad = true;
+  let previousConnectionState = client.getConnectionState();
+
+  client.on('stateChanged', (newState) => {
+    updateStatusBar();
+    if (newState === 'CONNECTED' && previousConnectionState !== 'CONNECTED') {
+      vscode.window.showInformationMessage('Cyravell Security Engine: Connected and active.');
+    }
+    previousConnectionState = newState;
+  });
+
+  client.on('updated', () => {
+    updateStatusBar();
+
+    if (!client) {
+      return;
+    }
+
+    const events = client.recentEvents;
+    if (isInitialLoad) {
+      for (const ev of events) {
+        notifiedEventIds.add(ev.event.id);
+      }
+      isInitialLoad = false;
+      return;
+    }
+
+    for (const item of events) {
+      if (notifiedEventIds.has(item.event.id)) {
+        continue;
+      }
+      notifiedEventIds.add(item.event.id);
+
+      const sev = item.assessment.severity;
+      const cmd = item.event.payload.command ? ` | Command: ${item.event.payload.command}` : '';
+      const rule = item.assessment.rule_id;
+      const reason = item.assessment.reason;
+
+      if (item.event.execution_status === 'PENDING_APPROVAL') {
+        vscode.window
+          .showWarningMessage(
+            `[Cyravell Approval Required] ${reason}${cmd}`,
+            'Review Approvals',
+            'Inspect Event'
+          )
+          .then((action) => {
+            if (action === 'Review Approvals') {
+              vscode.commands.executeCommand('cyravell.reviewApprovals');
+            } else if (action === 'Inspect Event') {
+              vscode.commands.executeCommand('cyravell.inspectEvent', item);
+            }
+          });
+      } else if (sev === 'CRITICAL') {
+        vscode.window
+          .showErrorMessage(
+            `[Cyravell Alert] CRITICAL: ${reason} [${rule}]${cmd}`,
+            'Inspect Event'
+          )
+          .then((action) => {
+            if (action === 'Inspect Event') {
+              vscode.commands.executeCommand('cyravell.inspectEvent', item);
+            }
+          });
+      } else if (sev === 'HIGH') {
+        vscode.window
+          .showWarningMessage(
+            `[Cyravell Alert] HIGH: ${reason} [${rule}]${cmd}`,
+            'Inspect Event'
+          )
+          .then((action) => {
+            if (action === 'Inspect Event') {
+              vscode.commands.executeCommand('cyravell.inspectEvent', item);
+            }
+          });
+      }
+    }
+  });
 
   // Views
   const statusProvider = new StatusViewProvider(client);

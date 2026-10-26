@@ -299,6 +299,8 @@ export class EngineClient extends EventEmitter {
   private buffer = '';
   private reqIdCounter = 0;
   private pollInterval: NodeJS.Timeout | null = null;
+  private reconnectInterval: NodeJS.Timeout | null = null;
+  private manualDisconnect = false;
 
   public health: HealthInfo | null = null;
   public integrity: IntegrityInfo | null = null;
@@ -334,6 +336,7 @@ export class EngineClient extends EventEmitter {
   }
 
   public connect(): Promise<boolean> {
+    this.manualDisconnect = false;
     if (this.state === 'CONNECTED' || this.state === 'CONNECTING') {
       return Promise.resolve(true);
     }
@@ -343,6 +346,7 @@ export class EngineClient extends EventEmitter {
     return new Promise((resolve) => {
       if (!fs.existsSync(this.socketPath)) {
         this.setState('DISCONNECTED');
+        this.startAutoReconnect();
         resolve(false);
         return;
       }
@@ -360,15 +364,18 @@ export class EngineClient extends EventEmitter {
 
           if (handshake && handshake.status === 'ready') {
             this.setState('CONNECTED');
+            this.stopAutoReconnect();
             await this.refresh();
             this.startPolling();
             resolve(true);
           } else {
             this.setState('DEGRADED');
+            this.startAutoReconnect();
             resolve(false);
           }
         } catch (e) {
           this.setState('DEGRADED');
+          this.startAutoReconnect();
           resolve(false);
         }
       });
@@ -388,17 +395,44 @@ export class EngineClient extends EventEmitter {
       socket.on('error', (err) => {
         this.cleanupSocket();
         this.setState('DISCONNECTED');
+        this.startAutoReconnect();
         resolve(false);
       });
 
       socket.on('close', () => {
         this.cleanupSocket();
         this.setState('DISCONNECTED');
+        this.startAutoReconnect();
       });
     });
   }
 
+  public startAutoReconnect() {
+    if (this.reconnectInterval || this.manualDisconnect) {
+      return;
+    }
+    this.reconnectInterval = setInterval(async () => {
+      if (this.state === 'DISCONNECTED' && !this.manualDisconnect) {
+        if (fs.existsSync(this.socketPath)) {
+          const success = await this.connect();
+          if (success) {
+            this.stopAutoReconnect();
+          }
+        }
+      }
+    }, 2500);
+  }
+
+  public stopAutoReconnect() {
+    if (this.reconnectInterval) {
+      clearInterval(this.reconnectInterval);
+      this.reconnectInterval = null;
+    }
+  }
+
   public disconnect() {
+    this.manualDisconnect = true;
+    this.stopAutoReconnect();
     this.stopPolling();
     this.cleanupSocket();
     this.setState('DISCONNECTED');

@@ -41,6 +41,50 @@ pub struct EngineState {
     pub rollback_manager: Arc<crate::auth::RollbackAuthorizationManager>,
 }
 
+impl EngineState {
+    pub fn record_evaluated_event(
+        &self,
+        command: &str,
+        working_dir: Option<&str>,
+        assessment: &RiskAssessment,
+        status: ExecutionStatus,
+        audit_seq: u64,
+        audit_hash: &str,
+    ) {
+        self.events_processed.fetch_add(1, Ordering::SeqCst);
+        let event = SecurityEvent {
+            id: format!("evt-gate-{}", uuid::Uuid::new_v4()),
+            schema_version: 1,
+            timestamp: chrono::Utc::now(),
+            event_type: EventType::TerminalCommand,
+            source_adapter: "controlled_execution_gate".to_string(),
+            origin: Origin::Observed,
+            execution_status: status,
+            enforcement_capability: EnforcementCapability::PreExecBlock,
+            payload: EventPayload {
+                command: Some(crate::analysis::redact_command(command)),
+                working_directory: working_dir.map(|s| s.to_string()),
+                target_paths: vec![],
+                environment_keys: vec![],
+                metadata: std::collections::HashMap::new(),
+            },
+        };
+
+        let evaluated_record = EvaluatedEventRecord {
+            event,
+            assessment: assessment.clone(),
+            audit_sequence: audit_seq,
+            audit_hash: audit_hash.to_string(),
+        };
+
+        let mut recent = self.recent_events.lock().unwrap();
+        if recent.len() >= 100 {
+            recent.pop_front();
+        }
+        recent.push_back(evaluated_record);
+    }
+}
+
 pub struct IpcServer {
     socket_path: PathBuf,
     state: Arc<EngineState>,
@@ -577,7 +621,17 @@ fn dispatch_request(
                         ),
                         Severity::Critical,
                     ) {
-                        Ok(rec) => (Some(rec.sequence_number), Some(rec.current_record_hash)),
+                        Ok(rec) => {
+                            state.record_evaluated_event(
+                                raw_cmd,
+                                eval_params.working_directory.as_deref(),
+                                &risk,
+                                ExecutionStatus::BlockedConfirmed,
+                                rec.sequence_number,
+                                &rec.current_record_hash,
+                            );
+                            (Some(rec.sequence_number), Some(rec.current_record_hash))
+                        }
                         Err(_) => (None, None),
                     };
 
@@ -663,6 +717,14 @@ fn dispatch_request(
                                 Severity::Critical,
                             ) {
                                 Ok(rec) => {
+                                    state.record_evaluated_event(
+                                        raw_cmd,
+                                        eval_params.working_directory.as_deref(),
+                                        &risk,
+                                        ExecutionStatus::BlockedConfirmed,
+                                        rec.sequence_number,
+                                        &rec.current_record_hash,
+                                    );
                                     (Some(rec.sequence_number), Some(rec.current_record_hash))
                                 }
                                 Err(_) => (None, None),
@@ -733,6 +795,14 @@ fn dispatch_request(
                                     Severity::Critical,
                                 ) {
                                     Ok(rec) => {
+                                        state.record_evaluated_event(
+                                            raw_cmd,
+                                            eval_params.working_directory.as_deref(),
+                                            &risk,
+                                            ExecutionStatus::BlockedConfirmed,
+                                            rec.sequence_number,
+                                            &rec.current_record_hash,
+                                        );
                                         (Some(rec.sequence_number), Some(rec.current_record_hash))
                                     }
                                     Err(_) => (None, None),
@@ -784,21 +854,6 @@ fn dispatch_request(
                                         pkg_res.manifest_fingerprint.clone(),
                                     );
 
-                                let (seq, hash) = match state.audit.append(
-                                    &format!("gate-{}", uuid::Uuid::new_v4()),
-                                    "GATE_PendingApproval",
-                                    &format!(
-                                        "Command: {}, Package vulnerabilities requiring approval",
-                                        sanitized
-                                    ),
-                                    max_sev,
-                                ) {
-                                    Ok(rec) => {
-                                        (Some(rec.sequence_number), Some(rec.current_record_hash))
-                                    }
-                                    Err(_) => (None, None),
-                                };
-
                                 let risk = RiskAssessment {
                                     severity: max_sev,
                                     confidence: Confidence::High,
@@ -825,6 +880,29 @@ fn dispatch_request(
                                     ),
                                     analysis_completeness: AnalysisCompleteness::Complete,
                                     analysis_details: None,
+                                };
+
+                                let (seq, hash) = match state.audit.append(
+                                    &format!("gate-{}", uuid::Uuid::new_v4()),
+                                    "GATE_PendingApproval",
+                                    &format!(
+                                        "Command: {}, Package vulnerabilities requiring approval",
+                                        sanitized
+                                    ),
+                                    max_sev,
+                                ) {
+                                    Ok(rec) => {
+                                        state.record_evaluated_event(
+                                            raw_cmd,
+                                            eval_params.working_directory.as_deref(),
+                                            &risk,
+                                            ExecutionStatus::PendingApproval,
+                                            rec.sequence_number,
+                                            &rec.current_record_hash,
+                                        );
+                                        (Some(rec.sequence_number), Some(rec.current_record_hash))
+                                    }
+                                    Err(_) => (None, None),
                                 };
 
                                 let res = GateEvaluateResult {
@@ -883,18 +961,6 @@ fn dispatch_request(
                                     pkg_res.manifest_fingerprint.clone(),
                                 );
 
-                            let (seq, hash) = match state.audit.append(
-                                &format!("gate-{}", uuid::Uuid::new_v4()),
-                                "GATE_PendingApproval",
-                                &format!("Command: {}, {}", sanitized, reason_str),
-                                Severity::High,
-                            ) {
-                                Ok(rec) => {
-                                    (Some(rec.sequence_number), Some(rec.current_record_hash))
-                                }
-                                Err(_) => (None, None),
-                            };
-
                             let risk = RiskAssessment {
                                 severity: Severity::High,
                                 confidence: Confidence::High,
@@ -910,6 +976,26 @@ fn dispatch_request(
                                 ),
                                 analysis_completeness: AnalysisCompleteness::Complete,
                                 analysis_details: None,
+                            };
+
+                            let (seq, hash) = match state.audit.append(
+                                &format!("gate-{}", uuid::Uuid::new_v4()),
+                                "GATE_PendingApproval",
+                                &format!("Command: {}, {}", sanitized, reason_str),
+                                Severity::High,
+                            ) {
+                                Ok(rec) => {
+                                    state.record_evaluated_event(
+                                        raw_cmd,
+                                        eval_params.working_directory.as_deref(),
+                                        &risk,
+                                        ExecutionStatus::PendingApproval,
+                                        rec.sequence_number,
+                                        &rec.current_record_hash,
+                                    );
+                                    (Some(rec.sequence_number), Some(rec.current_record_hash))
+                                }
+                                Err(_) => (None, None),
                             };
 
                             let res = GateEvaluateResult {
@@ -951,18 +1037,6 @@ fn dispatch_request(
                                     pkg_res.manifest_fingerprint.clone(),
                                 );
 
-                            let (seq, hash) = match state.audit.append(
-                                &format!("gate-{}", uuid::Uuid::new_v4()),
-                                "GATE_PendingApproval",
-                                &format!("Command: {}, Manifest parsing failed", sanitized),
-                                Severity::High,
-                            ) {
-                                Ok(rec) => {
-                                    (Some(rec.sequence_number), Some(rec.current_record_hash))
-                                }
-                                Err(_) => (None, None),
-                            };
-
                             let risk = RiskAssessment {
                                 severity: Severity::High,
                                 confidence: Confidence::High,
@@ -979,6 +1053,26 @@ fn dispatch_request(
                                 ),
                                 analysis_completeness: AnalysisCompleteness::Inconclusive,
                                 analysis_details: None,
+                            };
+
+                            let (seq, hash) = match state.audit.append(
+                                &format!("gate-{}", uuid::Uuid::new_v4()),
+                                "GATE_PendingApproval",
+                                &format!("Command: {}, Manifest parsing failed", sanitized),
+                                Severity::High,
+                            ) {
+                                Ok(rec) => {
+                                    state.record_evaluated_event(
+                                        raw_cmd,
+                                        eval_params.working_directory.as_deref(),
+                                        &risk,
+                                        ExecutionStatus::PendingApproval,
+                                        rec.sequence_number,
+                                        &rec.current_record_hash,
+                                    );
+                                    (Some(rec.sequence_number), Some(rec.current_record_hash))
+                                }
+                                Err(_) => (None, None),
                             };
 
                             let res = GateEvaluateResult {
@@ -1067,6 +1161,19 @@ fn dispatch_request(
                     &rationale,
                     assessment.severity,
                 ) {
+                    let exec_status = match outcome {
+                        ExecutionOutcome::BlockedByPolicy => ExecutionStatus::BlockedConfirmed,
+                        ExecutionOutcome::PendingApproval => ExecutionStatus::PendingApproval,
+                        _ => ExecutionStatus::Intercepted,
+                    };
+                    state.record_evaluated_event(
+                        raw_cmd,
+                        eval_params.working_directory.as_deref(),
+                        &assessment,
+                        exec_status,
+                        rec.sequence_number,
+                        &rec.current_record_hash,
+                    );
                     (Some(rec.sequence_number), Some(rec.current_record_hash))
                 } else {
                     (None, None)
@@ -1190,6 +1297,21 @@ fn dispatch_request(
                                 post_sev,
                             );
                         }
+                    }
+
+                    if record_params.outcome == ExecutionOutcome::Dispatched {
+                        let policy_assessment = state.policy.analyze_command_string(
+                            &sanitized,
+                            record_params.working_directory.as_deref(),
+                        );
+                        state.record_evaluated_event(
+                            &record_params.command,
+                            record_params.working_directory.as_deref(),
+                            &policy_assessment,
+                            ExecutionStatus::Observed,
+                            rec.sequence_number,
+                            &rec.current_record_hash,
+                        );
                     }
 
                     let res = GateRecordOutcomeResult {
@@ -1491,7 +1613,25 @@ fn dispatch_request(
                 &format!("Command: {}, {}", sanitized, detail),
                 approved_req.severity,
             ) {
-                Ok(rec) => (rec.sequence_number, rec.current_record_hash),
+                Ok(rec) => {
+                    let dir_str = working_path.map(|p| p.to_string_lossy().to_string());
+                    let policy_assessment = state
+                        .policy
+                        .analyze_command_string(&sanitized, dir_str.as_deref());
+                    state.record_evaluated_event(
+                        &dispatch_params.command,
+                        dir_str.as_deref(),
+                        &policy_assessment,
+                        if dispatched {
+                            ExecutionStatus::Observed
+                        } else {
+                            ExecutionStatus::Intercepted
+                        },
+                        rec.sequence_number,
+                        &rec.current_record_hash,
+                    );
+                    (rec.sequence_number, rec.current_record_hash)
+                }
                 Err(_) => (0, "UNRECORDED".to_string()),
             };
 
