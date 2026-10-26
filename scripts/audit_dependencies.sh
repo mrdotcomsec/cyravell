@@ -28,13 +28,39 @@ else
   echo "  ✓ vscode-extension/package-lock.json is present"
 fi
 
-# 2. Deterministic Rust Dependency Resolution (--locked)
+# 2. Deterministic Rust Dependency Resolution (--locked) & Toolchain Compatibility
 echo ""
 echo "[2/6] Verifying deterministic Rust dependency resolution..."
-if (cd "${ROOT_DIR}" && cargo check --locked --workspace > /dev/null 2>&1); then
+
+# Verify compiler meets Minimum Supported Rust Version (MSRV 1.89+)
+RUSTC_VER_RAW="$(rustc --version 2>/dev/null || echo "")"
+if [ -n "${RUSTC_VER_RAW}" ]; then
+  RUSTC_SEMVER="$(echo "${RUSTC_VER_RAW}" | awk '{print $2}')"
+  if ! python3 -c "import sys; v = sys.argv[1].split('.'); sys.exit(0 if (int(v[0]), int(v[1])) >= (1, 89) else 1)" "${RUSTC_SEMVER}" 2>/dev/null; then
+    echo "  ✗ Error: Unsupported Rust toolchain version: rustc ${RUSTC_SEMVER}"
+    echo "    Cyravell requires Rust 1.89+ (supporting Cargo Edition 2024 and uuid 1.29+)."
+    echo "    Please upgrade the Rust toolchain: rustup update stable"
+    ERRORS=$((ERRORS + 1))
+  else
+    echo "  ✓ Rust toolchain version compatible: rustc ${RUSTC_SEMVER} (MSRV 1.89+ satisfied)"
+  fi
+fi
+
+CARGO_CHECK_OUTPUT=""
+if CARGO_CHECK_OUTPUT=$(cd "${ROOT_DIR}" && cargo check --locked --workspace 2>&1); then
   echo "  ✓ cargo check --locked succeeded (zero floating dependency drift)"
 else
-  echo "  ✗ Error: cargo check --locked failed! Dependencies differ from Cargo.lock"
+  if echo "${CARGO_CHECK_OUTPUT}" | grep -qE "needs to be updated|lock file.*needs to be updated"; then
+    echo "  ✗ Error: cargo check --locked failed! Dependencies differ from Cargo.lock"
+    echo "    Committed lockfile is out of sync with workspace Cargo.toml manifests."
+  elif echo "${CARGO_CHECK_OUTPUT}" | grep -qE "edition|rust-version|feature.*is required"; then
+    echo "  ✗ Error: cargo check --locked failed due to compiler/toolchain incompatibility:"
+    echo "${CARGO_CHECK_OUTPUT}" | sed 's/^/    /'
+    echo "    Current Rust toolchain does not satisfy dependency edition/rust-version requirements."
+  else
+    echo "  ✗ Error: cargo check --locked failed:"
+    echo "${CARGO_CHECK_OUTPUT}" | sed 's/^/    /'
+  fi
   ERRORS=$((ERRORS + 1))
 fi
 

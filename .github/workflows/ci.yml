@@ -22,7 +22,7 @@ jobs:
         # Pinned to verified full commit SHA
         uses: dtolnay/rust-toolchain@683b588c487a69d01f6c6ddf40f036ff682cc2c8
         with:
-          toolchain: 1.80.0
+          toolchain: stable
 
       - name: Setup Node.js Environment
         # Pinned to v4.0.2 commit SHA
@@ -45,7 +45,7 @@ jobs:
         # Pinned to verified full commit SHA
         uses: dtolnay/rust-toolchain@683b588c487a69d01f6c6ddf40f036ff682cc2c8
         with:
-          toolchain: 1.80.0
+          toolchain: stable
           components: rustfmt, clippy
 
       - name: Check Formatting
@@ -55,10 +55,10 @@ jobs:
         run: cargo check --locked --workspace
 
       - name: Static Analysis (Clippy -D warnings)
-        run: cargo clippy --workspace -- -D warnings
+        run: cargo clippy --locked --workspace -- -D warnings
 
       - name: Run Rust Tests (Workspace)
-        run: cargo test --workspace -- --nocapture
+        run: cargo test --locked --workspace -- --nocapture
 
   extension-tests:
     name: VS Code Extension Quality & Tests
@@ -102,7 +102,7 @@ jobs:
         # Pinned to verified full commit SHA
         uses: dtolnay/rust-toolchain@683b588c487a69d01f6c6ddf40f036ff682cc2c8
         with:
-          toolchain: 1.80.0
+          toolchain: stable
 
       - name: Setup Node.js Environment
         # Pinned to v4.0.2 commit SHA

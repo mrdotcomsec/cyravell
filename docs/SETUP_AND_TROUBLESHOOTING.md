@@ -8,7 +8,7 @@
 ## 1. Prerequisites
 
 - **Operating System:** Ubuntu 22.04 / 24.04 LTS (or compatible Linux distribution)
-- **Rust Toolchain:** Stable Rust (1.80+) with `cargo` (`curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh`)
+- **Rust Toolchain:** Stable Rust (1.89+ / Edition 2024 compatible, configured in `rust-toolchain.toml`) with `cargo` (`curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh`). Locked workspace dependencies require Rust 1.89+ (supporting Cargo Edition 2024 for `base64ct`, `clap`, `zeroize`, and MSRV 1.89 for `uuid 1.29+`).
 - **Node.js & npm:** Node.js v18.x or v20.x, npm 9.x+
 - **Visual Studio Code:** VS Code 1.80+ (`/snap/bin/code` or `.deb` installation)
 

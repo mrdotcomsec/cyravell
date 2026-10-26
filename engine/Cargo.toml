@@ -2,6 +2,7 @@
 name = "cyravell-engine"
 version = "0.1.0"
 edition = "2021"
+rust-version = "1.89"
 authors = ["Cyravell Contributors"]
 license = "Apache-2.0"
 description = "Deterministic local-first security engine for AI coding agents"

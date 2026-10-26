@@ -2,6 +2,7 @@
 name = "cyravell-test-harness"
 version = "0.1.0"
 edition = "2021"
+rust-version = "1.89"
 authors = ["Cyravell Contributors"]
 license = "Apache-2.0"
 description = "Synthetic event generator and tamper test harness for Cyravell"
