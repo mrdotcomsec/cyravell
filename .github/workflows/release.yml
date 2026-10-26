@@ -60,8 +60,8 @@ jobs:
           fi
 
       - name: Setup Rust Toolchain
-        # Pinned to master commit SHA (2024-03)
-        uses: dtolnay/rust-toolchain@7b7640457d930a38d9bda16020914e66cf17f65a
+        # Pinned to verified full commit SHA
+        uses: dtolnay/rust-toolchain@683b588c487a69d01f6c6ddf40f036ff682cc2c8
         with:
           toolchain: 1.80.0
           components: rustfmt, clippy
@@ -115,8 +115,8 @@ jobs:
           echo "✓ Release signing secret is configured."
 
       - name: Setup Rust Toolchain
-        # Pinned to master commit SHA (2024-03)
-        uses: dtolnay/rust-toolchain@7b7640457d930a38d9bda16020914e66cf17f65a
+        # Pinned to verified full commit SHA
+        uses: dtolnay/rust-toolchain@683b588c487a69d01f6c6ddf40f036ff682cc2c8
         with:
           toolchain: 1.80.0
 
