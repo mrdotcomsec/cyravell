@@ -61,7 +61,16 @@ Cyravell intercepts and assesses terminal commands before execution, inspects pa
 
 ## Quick Start
 
-### 1. Build and Run Tests
+### 1. One-Command Installation (Recommended)
+```bash
+# Builds components, installs engine, rules, VS Code extension, and starts daemon:
+./install.sh
+
+# Or install system-wide with sudo:
+sudo ./install.sh
+```
+
+### 2. Build and Run Tests
 ```bash
 # Compile Rust engine and run complete test pipeline
 cargo test --workspace

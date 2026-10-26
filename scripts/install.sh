@@ -286,8 +286,14 @@ else:
     fi
 
     if [ ! -d "${RELEASE_DIR}" ]; then
-      echo "✗ Error: Release directory '${RELEASE_DIR}' does not exist!"
-      exit 1
+      if [ -f "${ROOT_DIR}/install.sh" ]; then
+        echo "  ℹ Pre-packaged release directory '${RELEASE_DIR}' not found."
+        echo "  Running one-command source installer..."
+        exec "${ROOT_DIR}/install.sh" "$@"
+      else
+        echo "✗ Error: Release directory '${RELEASE_DIR}' does not exist!"
+        exit 1
+      fi
     fi
 
     # Step 1: Zero-Binary-Execution Pre-Verification

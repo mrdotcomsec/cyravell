@@ -29,6 +29,13 @@ echo "[2/7] Testing release integrity verification against manifest..."
 echo ""
 echo "[3/7] Running VS Code extension client tests..."
 cd "${ROOT_DIR}/vscode-extension"
+if [ ! -f "out/engineClient.js" ]; then
+  echo "  Compiling VS Code extension TypeScript..."
+  if [ ! -d "node_modules" ]; then
+    npm ci --ignore-scripts --silent 2>/dev/null || npm install --silent
+  fi
+  npm run compile --silent
+fi
 node -e '
   const { EngineClient } = require("./out/engineClient");
   const assert = require("assert");

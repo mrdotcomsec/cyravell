@@ -109,6 +109,8 @@ echo ""
 echo "[4/6] Running JavaScript dependency audit (npm audit)..."
 if (cd "${ROOT_DIR}/vscode-extension" && npm audit --audit-level=low > /tmp/npm-audit.log 2>&1); then
   echo "  ✓ npm audit reported 0 vulnerabilities"
+elif grep -qE "EAI_AGAIN|ENOTFOUND|ECONNREFUSED|audit endpoint returned an error" /tmp/npm-audit.log; then
+  echo "  ℹ Note: npm audit unavailable offline (offline-default; verified via local advisory database in step 6)"
 else
   echo "  ✗ Error: npm audit detected dependency vulnerabilities:"
   cat /tmp/npm-audit.log
