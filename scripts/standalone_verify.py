@@ -23,6 +23,85 @@ try:
 except ImportError:
     HAS_CRYPTOGRAPHY = False
 
+# RFC 8032 Ed25519 pure Python implementation (Zero external dependency fallback)
+_P = 2**255 - 19
+_D = -121665 * pow(121666, -1, _P) % _P
+_Q = 2**252 + 27742317777372353535851937790883648493
+_I = pow(2, (_P - 1) // 4, _P)
+
+def _inv(z):
+    return pow(z, _P - 2, _P)
+
+def _xrecover(y):
+    xx = (y * y - 1) * _inv(_D * y * y + 1)
+    x = pow(xx, (_P + 3) // 8, _P)
+    if (x * x - xx) % _P != 0:
+        x = (x * _I) % _P
+    if x % 2 != 0:
+        x = _P - x
+    return x
+
+def _edwards_add(P, Q):
+    x1, y1 = P
+    x2, y2 = Q
+    x3 = (x1 * y2 + x2 * y1) * _inv(1 + _D * x1 * x2 * y1 * y2) % _P
+    y3 = (y1 * y2 + x1 * x2) * _inv(1 - _D * x1 * x2 * y1 * y2) % _P
+    return (x3, y3)
+
+def _scalarmult(P, e):
+    if e == 0:
+        return (0, 1)
+    Q = _scalarmult(P, e // 2)
+    Q = _edwards_add(Q, Q)
+    if e & 1:
+        Q = _edwards_add(Q, P)
+    return Q
+
+_By = 4 * _inv(5) % _P
+_Bx = _xrecover(_By)
+_B = (_Bx, _By)
+
+def _decodepoint(s):
+    y = int.from_bytes(s, "little") & ((1 << 255) - 1)
+    x = _xrecover(y)
+    if (x & 1) != ((s[31] >> 7) & 1):
+        x = _P - x
+    return (x, y)
+
+def verify_ed25519_signature(pubkey_bytes, sig_bytes, msg_bytes):
+    """
+    Verifies an Ed25519 signature. Uses cryptography package if available,
+    otherwise falls back to RFC 8032 pure-Python implementation.
+    """
+    if len(pubkey_bytes) != 32 or len(sig_bytes) != 64:
+        return False
+
+    if HAS_CRYPTOGRAPHY:
+        try:
+            vk = Ed25519PublicKey.from_public_bytes(pubkey_bytes)
+            vk.verify(sig_bytes, msg_bytes)
+            return True
+        except Exception:
+            return False
+
+    # Pure Python RFC 8032 fallback
+    try:
+        R_bytes = sig_bytes[:32]
+        S_bytes = sig_bytes[32:]
+        s = int.from_bytes(S_bytes, "little")
+        if s >= _Q:
+            return False
+        A = _decodepoint(pubkey_bytes)
+        R = _decodepoint(R_bytes)
+        h = hashlib.sha512(R_bytes + pubkey_bytes + msg_bytes).digest()
+        k = int.from_bytes(h, "little") % _Q
+        SB = _scalarmult(_B, s)
+        kA = _scalarmult(A, k)
+        R_plus_kA = _edwards_add(R, kA)
+        return SB == R_plus_kA
+    except Exception:
+        return False
+
 DEFAULT_OFFICIAL_PUBKEY_HEX = "9e9f6bf692b6f360a13419327f445a4378357219dea595f6c468916d60ef8a78"
 DEFAULT_OFFICIAL_KEY_ID = "cyravell-release-official-2026"
 DEFAULT_DEV_PUBKEY_HEX = "46e59f5579ecb6852665043f138d994df7688022c8e4c55aba4ad891a8d61c75"
@@ -204,18 +283,17 @@ def verify_release(manifest_path, artifacts_dir, keys_file=None,
         if not allow_dev_keys and not is_official:
             errors.append(f"Untrusted key role: Key '{key_id}' is designated as development/test only; official production release signing key is required")
 
-        if not HAS_CRYPTOGRAPHY:
-            errors.append("Missing 'cryptography' Python package for Ed25519 signature verification")
-        else:
-            try:
-                pub_bytes = bytes.fromhex(key_info["public_key_hex"])
-                sig_bytes = bytes.fromhex(signature_hex)
-                vk = Ed25519PublicKey.from_public_bytes(pub_bytes)
-                c_bytes = canonical_signing_bytes(manifest)
-                vk.verify(sig_bytes, c_bytes)
-                print(f"  ✓ Signature verified with key '{key_id}' ({key_info.get('publisher')})")
-            except Exception as e:
-                errors.append(f"Cryptographic signature verification failed: {e}")
+        try:
+            pub_bytes = bytes.fromhex(key_info["public_key_hex"])
+            sig_bytes = bytes.fromhex(signature_hex)
+            c_bytes = canonical_signing_bytes(manifest)
+            if verify_ed25519_signature(pub_bytes, sig_bytes, c_bytes):
+                engine_type = "accelerated" if HAS_CRYPTOGRAPHY else "standard Python RFC 8032"
+                print(f"  ✓ Signature verified with key '{key_id}' ({key_info.get('publisher')}) [{engine_type}]")
+            else:
+                errors.append(f"Cryptographic signature verification failed for key '{key_id}'")
+        except Exception as e:
+            errors.append(f"Cryptographic signature verification error: {e}")
 
     # Check artifacts
     artifacts = manifest.get("artifacts", {})

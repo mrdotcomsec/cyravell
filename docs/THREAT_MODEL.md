@@ -292,4 +292,22 @@ Phase 3.0 addresses software supply-chain threats targeting Cyravell's release a
    - *Threat:* An attacker injects hidden `.sh`, `.bin`, `.py`, or `.so` files into the release archive.
    - *Mitigation:* Release directory scanning detects and rejects unlisted executable files with `ReleaseStatus::SecurityCheckFailed`.
 
+## 11. Installation, Update, and Recovery Threats (Phase 3.2)
+
+### 11.1 Threat Matrix & Mitigations
+
+| Threat ID | Threat Scenario | Attack Vector | Security Impact | Cyravell Mitigation (Phase 3.2) |
+| :--- | :--- | :--- | :--- | :--- |
+| **INST-01** | **TOCTOU Tampering Between Verification and Copy** | Attacker modifies staged binaries after pre-verification passes | Execution of unverified, weaponized binaries | Atomic staging into isolated `.staging-<uuid>` directory, permissions locked to `0755`/`0600`, followed by atomic rename on the same filesystem. |
+| **INST-02** | **Symlink Hijacking in Destination Path** | Attacker creates symlinks at `bin/cyravell-engine` or `share/cyravell/rules` pointing to sensitive OS files | Overwriting critical system files (`/etc/shadow`, `/etc/sudoers`) | `safe_copy_file` and `safe_create_dir_all` explicitly check `symlink_metadata` on destination paths. Any symlink triggers immediate `InstallError::SecurityViolation`. |
+| **INST-03** | **Path Traversal in Rules Archive** | Malicious rules tarball contains entries with `../` or absolute paths | Arbitrary file overwrite outside the installation prefix | `safe_unpack_rules_bundle` inspects archive headers before extraction (`tar -tzf`), rejecting any path containing `..`, leading `/`, backslashes, or null bytes. |
+| **INST-04** | **Concurrent Installation Race Conditions** | Competing install, upgrade, or rollback processes run concurrently | Corrupted partially-written binaries, invalid state | `InstallLockGuard` acquires `.install.lock` using `O_CREAT | O_EXCL` with live PID validation and stale lock cleanup. Concurrent processes fail closed with `InstallError::LockBusy`. |
+| **INST-05** | **Post-Activation Regression or Broken Binary** | An updated binary crashes immediately or fails to execute on the host | Engine becomes non-functional, leaving terminal unprotected | Post-activation health check runs `cyravell-engine --version`. If it fails, Cyravell immediately triggers **automatic rollback** from `.backup/`. |
+| **INST-06** | **Unauthorized Downgrade to Vulnerable Engine** | Attacker attempts to downgrade engine to a previous version with known flaws | Re-introducing historical vulnerabilities | Engine enforces `SimpleSemVer` ordering against active and `high_water_version`. Downgrade fails closed unless `--allow-downgrade` and a descriptive operator reason (min 8 chars) are supplied. |
+| **INST-07** | **Advisory High-Water Mark Subversion Across Downgrade** | Attacker uses an application downgrade to erase malicious package tombstones or reset advisory timestamps | Permitting previously-blocked malicious packages | `high_water_version` and persistent advisory states (`data/advisory_security_state.json`) are decoupled from binary version and monotonically preserved across downgrades. |
+| **INST-08** | **Corrupted Backup Manipulation Attack** | Attacker modifies files in `.backup/` while Cyravell is running, then triggers rollback | Execution of untrusted code via recovery path | `rollback_installation` computes SHA-256 digests of all backup files and verifies them bit-for-bit against `install_state.json.backup_files` before restoring. Tampered backups are rejected. |
+| **INST-09** | **User Security State Erasure on Reinstall** | Reinstallation or uninstallation deletes developer audit trail or baselines | Loss of audit evidence and baseline guarantees | Persistent user state is isolated in `share/cyravell/data/` (`audit.log`, `baselines.json`). Normal installs and uninstalls leave this directory untouched; removal requires explicit `--purge-data`. |
+| **INST-10** | **Privilege Confusion & System Directory Overwrite** | Non-root process attempts to install to `/usr/local` without sudo | Incomplete installation or permission failures | Installer inspects effective UID (`geteuid`) and enforces user mode (`~/.local`) for non-root users. System mode to `/usr/local` requires root privileges. |
+
+
 

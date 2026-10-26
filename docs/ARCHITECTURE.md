@@ -664,7 +664,7 @@ Phase 3.0 secures the build, packaging, signing, and verification pipeline for a
 ### 14.2 Phase 3.1: Release Trust Chain and Independent Verification Hardening
 Phase 3.1 hardens the release verification pipeline and eliminates pre-installation bootstrap vulnerabilities:
 1. **Independent Standalone Verification Path (`scripts/standalone_verify.py`):**
-   - Pure Python 3 + `cryptography` tool that validates manifests, Ed25519 signatures, and SHA-256 digests without executing any downloaded executable.
+   - Pure Python 3 + RFC 8032 pure-Python Ed25519 arithmetic (with accelerated `cryptography` fallback) validates manifests, signatures, and SHA-256 digests without executing any downloaded executable.
    - Eliminates the bootstrap circular dependency where users had to execute downloaded binaries to verify them.
 2. **Cryptographic Key Separation & Official Tier Enforcement:**
    - Production official keys (`cyravell-release-official-2026`) marked `is_official: true`.
@@ -676,6 +676,76 @@ Phase 3.1 hardens the release verification pipeline and eliminates pre-installat
 4. **Git State & Packaging Invariants:**
    - Official packaging requires clean Git working tree (`git status --porcelain` empty), exact tag match on `HEAD`, and `CYRAVELL_RELEASE_SIGNING_KEY` present.
    - Build and packaging steps execute in an environment where signing secrets are isolated and unset.
+
+## 15. Phase 3.2: Secure Installation, Update, and Recovery Architecture
+
+Phase 3.2 builds a hardened lifecycle for installing, updating, and recovering Cyravell while preserving its local-first architecture, release verification, package security enforcement, and fail-closed behavior.
+
+```text
+┌────────────────────────────────────────────────────────────────────────┐
+│                      Cyravell Release Directory                        │
+│  release_manifest.json (signed)  │  cyravell-engine-x86_64-...         │
+│  cyravell-rules-bundle.tar.gz    │  cyravell-sbom.spdx.json            │
+└──────────────────────────────────┬─────────────────────────────────────┘
+                                   │
+                                   ▼
+┌────────────────────────────────────────────────────────────────────────┐
+│        Step 1: Zero-Binary-Execution Pre-Verification                  │
+│        (scripts/standalone_verify.py via RFC 8032 pure-Python)         │
+│        - Manifest signature verified against official ReleaseKeyStore  │
+│        - Bit-for-bit SHA-256 checksums verified for all artifacts      │
+│        - Rejects symlinks, special files, and unlisted executables    │
+└──────────────────────────────────┬─────────────────────────────────────┘
+                                   │ [Pass]
+                                   ▼
+┌────────────────────────────────────────────────────────────────────────┐
+│        Step 2: Concurrency Lock & Anti-Downgrade Inspection           │
+│        - Acquire O_CREAT | O_EXCL lock on share/cyravell/.install.lock │
+│        - Compare candidate version with active & high-water version   │
+│        - Enforce --allow-downgrade and operator reason (min 8 chars)   │
+└──────────────────────────────────┬─────────────────────────────────────┘
+                                   │ [Authorized]
+                                   ▼
+┌────────────────────────────────────────────────────────────────────────┐
+│        Step 3: Transactional Staging & Last Known-Good Backup          │
+│        - Stage binaries and unpack rules into .staging-<uuid>/         │
+│        - Backup active binaries and rules into share/cyravell/.backup/ │
+│        - Record backup file hashes in install_state.json               │
+└──────────────────────────────────┬─────────────────────────────────────┘
+                                   │
+                                   ▼
+┌────────────────────────────────────────────────────────────────────────┐
+│        Step 4: Atomic Activation & Post-Activation Sanity Check        │
+│        - Safely copy and rename files into bin/ and share/rules/       │
+│        - Execute self-test (cyravell-engine --version)                 │
+│        - If failed: AUTOMATIC ROLLBACK from .backup/                   │
+│        - If passed: Commit updated install_state.json atomically       │
+│        - Release .install.lock                                         │
+└────────────────────────────────────────────────────────────────────────┘
+```
+
+### 15.1 Privilege Boundaries
+- **User Mode (`~/.local`):** Standard unprivileged developer installation. Binaries are installed to `~/.local/bin`, rules and state to `~/.local/share/cyravell`. Never requires or prompts for `sudo`.
+- **System Mode (`/usr/local`):** System-wide shared installation. Binaries are placed in `/usr/local/bin`, rules and state in `/usr/local/share/cyravell`. Fails closed if invoked by non-root users without `sudo`.
+
+### 15.2 Anti-Downgrade & Monotonic Security Invariant
+- Candidate version must be `>=` active version and `>=` high-water mark version.
+- Attempts to install an older release without `--allow-downgrade` fail closed with `InstallError::DowngradeRejected`.
+- Authorized downgrades require an operator reason of at least 8 characters.
+- **Critical Invariant:** An application downgrade NEVER resets the monotonic advisory high-water mark, baseline records, or malicious package tombstones.
+
+### 15.3 Verifiable Recovery Path
+- Manual rollback can be triggered via `cyravell-engine rollback --reason <STR>` or `install.sh rollback --reason <STR>`.
+- The engine pre-verifies the SHA-256 digest of every file in `.backup/` against `install_state.json.backup_files` before restoring.
+- If any backup file was modified or corrupted, rollback fails closed with `SecurityViolation`.
+
+### 15.4 Persistent User State Isolation
+All persistent security data is located in `share/cyravell/data/`:
+- `data/audit.log` (cryptographic tamper-evident Merkle hash chain)
+- `data/advisory_security_state.json` (advisory high-water mark and active bundles)
+- `data/baselines.json` (dependency security baselines)
+Standard installations, upgrades, rollbacks, and uninstalls leave `share/cyravell/data/` untouched. Only explicit `--purge-data` uninstalls wipe user security state.
+
 
 
 

@@ -187,6 +187,98 @@ enum Commands {
         #[command(subcommand)]
         subcommand: AdvisoryCommands,
     },
+    /// Securely install or upgrade Cyravell from a verified release directory
+    Install {
+        /// Path to release directory containing release_manifest.json and deliverables
+        #[arg(short, long)]
+        release_dir: PathBuf,
+
+        /// Installation prefix (default: /usr/local for root, ~/.local for non-root)
+        #[arg(short, long)]
+        prefix: Option<PathBuf>,
+
+        /// Install in user mode (~/.local) without requiring root privileges
+        #[arg(long, default_value_t = false)]
+        user: bool,
+
+        /// Allow non-official development/test keys
+        #[arg(long, default_value_t = false)]
+        allow_dev_keys: bool,
+
+        /// Allow authorized downgrade to an older release version
+        #[arg(long, default_value_t = false)]
+        allow_downgrade: bool,
+
+        /// Required operator justification reason for authorized downgrade
+        #[arg(long)]
+        reason: Option<String>,
+
+        /// Expected release version (e.g. 0.1.0)
+        #[arg(long)]
+        expected_version: Option<String>,
+
+        /// Expected source git commit SHA
+        #[arg(long)]
+        expected_commit: Option<String>,
+
+        /// Output report in JSON format
+        #[arg(long, default_value_t = false)]
+        json: bool,
+    },
+    /// Rollback to the previous known-good Cyravell installation
+    Rollback {
+        /// Installation prefix (default: /usr/local for root, ~/.local for non-root)
+        #[arg(short, long)]
+        prefix: Option<PathBuf>,
+
+        /// User mode installation prefix (~/.local)
+        #[arg(long, default_value_t = false)]
+        user: bool,
+
+        /// Required operator justification reason for rollback
+        #[arg(short, long)]
+        reason: String,
+
+        /// Output report in JSON format
+        #[arg(long, default_value_t = false)]
+        json: bool,
+    },
+    /// Uninstall Cyravell executables, rules, and installation state
+    Uninstall {
+        /// Installation prefix (default: /usr/local for root, ~/.local for non-root)
+        #[arg(short, long)]
+        prefix: Option<PathBuf>,
+
+        /// User mode installation prefix (~/.local)
+        #[arg(long, default_value_t = false)]
+        user: bool,
+
+        /// Purge all user data, configuration, and audit logs as well
+        #[arg(long, default_value_t = false)]
+        purge_data: bool,
+
+        /// Optional operator reason
+        #[arg(short, long)]
+        reason: Option<String>,
+
+        /// Output report in JSON format
+        #[arg(long, default_value_t = false)]
+        json: bool,
+    },
+    /// Query the current installation and version state
+    InstallStatus {
+        /// Installation prefix (default: /usr/local for root, ~/.local for non-root)
+        #[arg(short, long)]
+        prefix: Option<PathBuf>,
+
+        /// User mode installation prefix (~/.local)
+        #[arg(long, default_value_t = false)]
+        user: bool,
+
+        /// Output in JSON format
+        #[arg(long, default_value_t = false)]
+        json: bool,
+    },
 }
 
 #[derive(Subcommand)]
@@ -1132,6 +1224,218 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 println!("\nStatus: {}", import_res.message);
             }
         },
+
+        Commands::Install {
+            release_dir,
+            prefix,
+            user,
+            allow_dev_keys,
+            allow_downgrade,
+            reason,
+            expected_version,
+            expected_commit,
+            json,
+        } => {
+            let is_root = unsafe { libc::geteuid() == 0 };
+            let install_prefix = if let Some(p) = prefix {
+                p
+            } else if user || !is_root {
+                let home = std::env::var("HOME").unwrap_or_else(|_| "/tmp".to_string());
+                PathBuf::from(home).join(".local")
+            } else {
+                PathBuf::from("/usr/local")
+            };
+
+            let opts = cyravell_engine::install::InstallOptions {
+                release_dir,
+                install_prefix,
+                is_user_mode: user || !is_root,
+                allow_dev_keys,
+                allow_downgrade,
+                operator_reason: reason,
+                expected_version,
+                expected_commit,
+                skip_post_install_test: false,
+                custom_keystore: None,
+            };
+
+            match cyravell_engine::install::install_or_update(&opts) {
+                Ok(report) => {
+                    if json {
+                        println!("{}", serde_json::to_string_pretty(&report)?);
+                    } else {
+                        println!("══════════════════════════════════════════════════════════════");
+                        println!("             Cyravell Installation Successful                 ");
+                        println!("══════════════════════════════════════════════════════════════");
+                        println!("Operation:         {}", report.operation);
+                        println!(
+                            "Active Version:    {}",
+                            report.active_version.as_deref().unwrap_or("unknown")
+                        );
+                        println!(
+                            "Previous Version:  {}",
+                            report.previous_version.as_deref().unwrap_or("none")
+                        );
+                        println!("Prefix:            {}", report.install_prefix.display());
+                        println!("Files Installed:   {}", report.files_installed.len());
+                        println!("Backup Created:    {}", report.backup_created);
+                        println!("Details:           {}", report.details);
+                        println!("══════════════════════════════════════════════════════════════");
+                    }
+                }
+                Err(err) => {
+                    eprintln!("✗ Installation failed: {}", err);
+                    std::process::exit(1);
+                }
+            }
+        }
+
+        Commands::Rollback {
+            prefix,
+            user,
+            reason,
+            json,
+        } => {
+            let is_root = unsafe { libc::geteuid() == 0 };
+            let install_prefix = if let Some(p) = prefix {
+                p
+            } else if user || !is_root {
+                let home = std::env::var("HOME").unwrap_or_else(|_| "/tmp".to_string());
+                PathBuf::from(home).join(".local")
+            } else {
+                PathBuf::from("/usr/local")
+            };
+
+            match cyravell_engine::install::rollback_installation(&install_prefix, &reason, false) {
+                Ok(report) => {
+                    if json {
+                        println!("{}", serde_json::to_string_pretty(&report)?);
+                    } else {
+                        println!("══════════════════════════════════════════════════════════════");
+                        println!("               Cyravell Rollback Successful                   ");
+                        println!("══════════════════════════════════════════════════════════════");
+                        println!(
+                            "Active Version:    {}",
+                            report.active_version.as_deref().unwrap_or("unknown")
+                        );
+                        println!(
+                            "Rolled Back From:  {}",
+                            report.previous_version.as_deref().unwrap_or("none")
+                        );
+                        println!("Details:           {}", report.details);
+                        println!("══════════════════════════════════════════════════════════════");
+                    }
+                }
+                Err(err) => {
+                    eprintln!("✗ Rollback failed: {}", err);
+                    std::process::exit(1);
+                }
+            }
+        }
+
+        Commands::Uninstall {
+            prefix,
+            user,
+            purge_data,
+            reason,
+            json,
+        } => {
+            let is_root = unsafe { libc::geteuid() == 0 };
+            let install_prefix = if let Some(p) = prefix {
+                p
+            } else if user || !is_root {
+                let home = std::env::var("HOME").unwrap_or_else(|_| "/tmp".to_string());
+                PathBuf::from(home).join(".local")
+            } else {
+                PathBuf::from("/usr/local")
+            };
+
+            match cyravell_engine::install::uninstall(
+                &install_prefix,
+                purge_data,
+                reason.as_deref(),
+            ) {
+                Ok(report) => {
+                    if json {
+                        println!("{}", serde_json::to_string_pretty(&report)?);
+                    } else {
+                        println!("══════════════════════════════════════════════════════════════");
+                        println!("             Cyravell Uninstalled Successfully                ");
+                        println!("══════════════════════════════════════════════════════════════");
+                        println!("Prefix:            {}", report.install_prefix.display());
+                        println!("Details:           {}", report.details);
+                        println!("══════════════════════════════════════════════════════════════");
+                    }
+                }
+                Err(err) => {
+                    eprintln!("✗ Uninstallation failed: {}", err);
+                    std::process::exit(1);
+                }
+            }
+        }
+
+        Commands::InstallStatus { prefix, user, json } => {
+            let is_root = unsafe { libc::geteuid() == 0 };
+            let install_prefix = if let Some(p) = prefix {
+                p
+            } else if user || !is_root {
+                let home = std::env::var("HOME").unwrap_or_else(|_| "/tmp".to_string());
+                PathBuf::from(home).join(".local")
+            } else {
+                PathBuf::from("/usr/local")
+            };
+
+            let state_file = install_prefix.join("share/cyravell/install_state.json");
+            match cyravell_engine::install::InstallState::load_from_path(&state_file) {
+                Ok(state) => {
+                    if json {
+                        println!("{}", serde_json::to_string_pretty(&state)?);
+                    } else {
+                        println!("══════════════════════════════════════════════════════════════");
+                        println!("                Cyravell Installation Status                 ");
+                        println!("══════════════════════════════════════════════════════════════");
+                        println!("Active Version:    {}", state.active_version);
+                        println!("Source Commit:     {}", state.active_commit);
+                        println!(
+                            "Source Tag:        {}",
+                            state.active_tag.as_deref().unwrap_or("none")
+                        );
+                        println!("Official Release:  {}", state.is_official);
+                        println!("Signing Key ID:    {}", state.signing_key_id);
+                        println!("Installed At:      {}", state.installed_at);
+                        println!("Installed By UID:  {}", state.installed_by_uid);
+                        println!("Prefix:            {}", state.install_prefix.display());
+                        println!(
+                            "Mode:              {}",
+                            if state.is_user_install {
+                                "User (~/.local)"
+                            } else {
+                                "System (/usr/local)"
+                            }
+                        );
+                        println!("High-Water Mark:   {}", state.high_water_version);
+                        println!(
+                            "Backup Version:    {}",
+                            state.backup_version.as_deref().unwrap_or("none")
+                        );
+                        println!(
+                            "Last Operation:    {} ({})",
+                            state.last_operation, state.last_operation_timestamp
+                        );
+                        println!("Tracked Files:     {} files", state.installed_files.len());
+                        println!("══════════════════════════════════════════════════════════════");
+                    }
+                }
+                Err(err) => {
+                    eprintln!(
+                        "No active Cyravell installation found at '{}': {}",
+                        install_prefix.display(),
+                        err
+                    );
+                    std::process::exit(1);
+                }
+            }
+        }
     }
 
     Ok(())

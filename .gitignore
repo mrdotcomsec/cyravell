@@ -7,5 +7,7 @@ out/
 *.vsix
 dist/
 *.spdx.json
+__pycache__/
+*.pyc
 
 

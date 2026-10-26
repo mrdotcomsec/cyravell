@@ -1,7 +1,7 @@
 # Cyravell Release Security & Software Supply-Chain Architecture
 
-**Document Version:** 1.1.0  
-**Phase:** Phase 3.1 (Release Trust Chain and Independent Verification Hardening)  
+**Document Version:** 1.2.0  
+**Phase:** Phase 3.2 (Secure Installation, Updates, and Recovery)  
 **Classification:** Public Engineering & Security Documentation  
 
 ---
@@ -10,11 +10,13 @@
 
 Cyravell is an open-source, local-first security monitoring system for AI coding agents. Because Cyravell intercepts terminal execution and governs package-manager operations, the integrity and provenance of Cyravell's own release artifacts are critical. A compromised security monitor would undermine the security boundary of developer workstations.
 
-Phase 3.0 established release manifest signing, SBOM generation, and CI automation. **Phase 3.1 hardens the release trust chain and independent verification path**, ensuring users can independently determine:
-- Which exact source revision produced a release.
-- Whether the release was authorized by the official publisher key.
-- Whether downloaded artifacts have been modified, swapped, or weaponized with symlinks.
-- How to verify downloads **without ever executing downloaded binaries before verification**.
+Phase 3.0 established release manifest signing, SBOM generation, and CI automation. Phase 3.1 hardened the release trust chain and independent verification path. **Phase 3.2 establishes a complete, secure lifecycle for installing, updating, and recovering Cyravell**, ensuring that:
+- Verified releases are safely installed without pre-verification binary execution.
+- Pure Python fallback (RFC 8032 Ed25519) allows verification on clean machines with **zero** external pip package dependencies.
+- Staging, backups, and atomic replacement guarantee transactional updates.
+- Post-activation sanity checks initiate automatic rollback if newly installed binaries fail health checks.
+- Unintended downgrades are strictly rejected, and high-water marks and security tombstones are monotonically preserved.
+- Existing user audit logs and persistent package-security states are never overwritten or lost across installations or updates.
 
 ---
 
@@ -133,11 +135,11 @@ Official packaging enforces strict security and repository integrity preconditio
 ### Eliminating Pre-Installation Binary Execution
 Prior release processes fell back to executing the downloaded binary (`cyravell-engine verify-release`) to verify itself if no engine was pre-installed. This created a bootstrap vulnerability: executing untrusted binaries before verifying them.
 
-Phase 3.1 eliminates this chicken-and-egg vulnerability by introducing **`scripts/standalone_verify.py`**:
-- Implements manifest parsing, canonical serialization, and Ed25519 signature checking using standard Python 3 + `cryptography`.
+Phase 3.1 and Phase 3.2 eliminate this chicken-and-egg vulnerability with **`scripts/standalone_verify.py`**:
 - **Zero Binary Execution:** Evaluates SHA-256 digests and file metadata without executing *any* downloaded executable.
-- Usable by any developer on a clean machine before installing Cyravell.
-- `scripts/verify_release.sh` executes `standalone_verify.py` as Step 1 before any engine cross-check.
+- **Pure-Python Standard Library Guarantee (RFC 8032):** Includes complete, self-contained pure-Python Ed25519 curve arithmetic (`_edwards_add`, `_scalarmult`, `_decodepoint`). If the accelerated C/Rust `cryptography` package is available, it is leveraged for performance; otherwise, verification executes seamlessly using **pure standard Python 3 with ZERO external pip dependencies**.
+- Usable by any developer or automation pipeline on a pristine machine before installing Cyravell.
+- `scripts/install.sh` executes `standalone_verify.py` as Step 1 before any binary is installed or executed.
 
 ### Filesystem & Anti-Tamper Hardening
 Both the standalone verifier and the Rust engine reject:
@@ -151,9 +153,27 @@ Both the standalone verifier and the Rust engine reject:
 
 ## 8. User Verification & Installation Instructions
 
-### Official Release Verification
+### One-Command Secure Installation (`scripts/install.sh`)
+The recommended, authoritative installation mechanism is `scripts/install.sh`:
 ```bash
-# 1. Standalone Verification (Zero binary execution, recommended for clean systems):
+# User-mode installation (~/.local, no sudo required):
+./scripts/install.sh install --release-dir path/to/release --user
+
+# System-wide installation (/usr/local, requires sudo):
+sudo ./scripts/install.sh install --release-dir path/to/release --system
+```
+`install.sh` automatically performs:
+1. Pure-Python / accelerated cryptographic pre-verification of all artifacts against `release_manifest.json`.
+2. Concurrency locking on `.install.lock`.
+3. Safe staging in `.staging-<uuid>`.
+4. Last known-good backup in `.backup/`.
+5. Atomic replacement of binaries and rules.
+6. Post-activation sanity checks (with automatic rollback on failure).
+7. Editor integration (installs `.vsix` extension if `code` CLI is present).
+
+### Manual Verification
+```bash
+# 1. Standalone Verification (Zero binary execution, standard Python 3):
 python3 scripts/standalone_verify.py \
   --manifest path/to/release/release_manifest.json \
   --artifacts-dir path/to/release
@@ -168,26 +188,19 @@ cyravell-engine verify-release \
   --expected-version 0.1.0
 ```
 
-### Development Build Verification
-When verifying builds signed with developer/test keys:
+### Installation Lifecycle & Maintenance Commands
 ```bash
-python3 scripts/standalone_verify.py \
-  --manifest path/to/release/release_manifest.json \
-  --artifacts-dir path/to/release \
-  --allow-dev-keys
-```
+# Query installation status and active versions:
+./scripts/install.sh status [--json]
 
-### Installation of Verified Artifacts
-Only proceed after verification outputs `✓ ALL VERIFICATION CHECKS PASSED`:
-```bash
-# 1. Engine Binary
-sudo install -m 755 path/to/release/cyravell-engine-x86_64-unknown-linux-gnu /usr/local/bin/cyravell-engine
+# Rollback to the previous known-good version (requires justification):
+./scripts/install.sh rollback --reason "Incident #402: regression in terminal parsing"
 
-# 2. Rules Bundle
-sudo tar -xzf path/to/release/cyravell-rules-bundle.tar.gz -C /usr/local/share/cyravell/
+# Uninstall Cyravell (preserves user audit logs and persistent security state):
+./scripts/install.sh uninstall
 
-# 3. VS Code Extension
-code --install-extension path/to/release/cyravell-0.1.0.vsix
+# Complete purge uninstall (removes binaries, rules, and user security logs):
+./scripts/install.sh uninstall --purge-data
 ```
 
 ### Detecting & Responding to Verification Failures
@@ -209,3 +222,57 @@ code --install-extension path/to/release/cyravell-0.1.0.vsix
 3. **Commit Continuity:** Confirms `GITHUB_SHA` is an ancestor of the `main` or `master` branch.
 4. **Isolated Signing Secret:** Secret `CYRAVELL_RELEASE_SIGNING_KEY` is isolated to the signing step and never exposed to build or test jobs.
 5. **Pre-Publish Verification:** Executes `./scripts/verify_release.sh` against the built artifacts before any artifact upload.
+
+---
+
+## 10. Secure Installation Architecture, Anti-Downgrade & Recovery (Phase 3.2)
+
+### 1. Invariants & Trust Hierarchy
+The installation subsystem (`engine/src/install.rs` and `scripts/install.sh`) maintains strict invariants:
+- **Zero Unverified Binary Execution:** Downloaded binaries are NEVER executed prior to passing bit-for-bit cryptographic verification against the signed manifest.
+- **Transactional Staging:** New binaries and unpacked rules are staged in `.staging-<uuid>` on the destination filesystem before touching active installation paths.
+- **Fail-Closed Concurrency Control:** A lockfile (`share/cyravell/.install.lock`) created with `O_CREAT | O_EXCL` prevents concurrent installations, upgrades, or rollbacks.
+- **Automatic Health Check & Rollback:** The newly installed engine executes a self-test (`--version`). If the test fails, Cyravell immediately rolls back active files to the `.backup/` snapshot.
+- **Monotonic High-Water Mark:** An older release cannot be installed over a newer release without `--allow-downgrade` and a descriptive operator reason (minimum 8 characters). Even under an authorized application downgrade, the persistent security state and advisory high-water mark are NEVER decreased.
+- **Persistent State Preservation:** User security logs (`data/audit.log`), advisory database states (`data/advisory_security_state.json`), and project baselines (`data/baselines.json`) are preserved across upgrades, rollbacks, and standard uninstalls. Only an explicit `--purge-data` flag removes user state.
+
+### 2. Installation State Schema (`share/cyravell/install_state.json`)
+The installation subsystem durably records active and backup installation state:
+```json
+{
+  "schema_version": "1.0.0",
+  "active_version": "0.1.0",
+  "active_commit": "651dd92b6067e7af5468b05911a351c45e6319bb",
+  "active_tag": "v0.1.0",
+  "installed_at": "2026-10-26T11:14:28Z",
+  "installed_by_uid": 1000,
+  "signing_key_id": "cyravell-release-official-2026",
+  "is_official": true,
+  "install_prefix": "/home/user/.local",
+  "is_user_install": true,
+  "installed_files": {
+    "bin/cyravell-engine": {
+      "relative_path": "bin/cyravell-engine",
+      "size_bytes": 14502800,
+      "sha256": "...",
+      "mode": 493
+    }
+  },
+  "backup_version": null,
+  "backup_files": {},
+  "high_water_version": "0.1.0",
+  "last_operation": "install",
+  "last_operation_timestamp": "2026-10-26T11:14:28Z"
+}
+```
+
+### 3. Authorized Recovery Workflow
+If an upgrade causes unanticipated issues in a developer environment, the operator can invoke the authorized rollback path:
+```bash
+./scripts/install.sh rollback --reason "Incident 402: terminal emulator hang with zsh 5.9"
+```
+Before restoring any file from `.backup/`, the rollback engine:
+1. Re-computes the SHA-256 digest of every backup file.
+2. Compares the digest against `install_state.json.backup_files`.
+3. Rejects rollback with `SecurityViolation` if any backup artifact was altered, tampered with, or corrupted.
+4. Atomically restores the verified files and updates `install_state.json`.

@@ -31,7 +31,7 @@ Cyravell intercepts and assesses terminal commands before execution, inspects pa
 
 ```text
 ┌────────────────────────────────────────────────────────┐
-│               Developer Workstation / IDE               │
+│               Developer Workstation / IDE              │
 │                                                        │
 │   ┌────────────────────┐      ┌────────────────────┐   │
 │   │ AI Coding Agent    │      │ VS Code Extension  │   │
@@ -91,7 +91,23 @@ cargo test --workspace
 ### 5. Verify Release Package Before Installation
 ```bash
 # Cryptographically verifies release manifest, Ed25519 signature, and bit-for-bit file digests
+# (Zero downloaded binary execution; standard Python 3 RFC 8032 fallback)
 ./scripts/verify_release.sh dist/release-v0.1.0 0.1.0
+```
+
+### 6. Secure Installation, Status, and Recovery
+```bash
+# Securely install or update Cyravell in user mode (~/.local, no sudo required):
+./scripts/install.sh install --release-dir dist/release-v0.1.0 --user
+
+# Query installation status:
+./scripts/install.sh status
+
+# Revert to last known-good installation if needed:
+./scripts/install.sh rollback --reason "Incident 402: regression recovery"
+
+# Safe uninstall (preserves user audit trail & security state):
+./scripts/install.sh uninstall
 ```
 
 ---

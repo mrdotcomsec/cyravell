@@ -13,21 +13,21 @@ echo "              Running Cyravell Test Pipeline                   "
 echo "══════════════════════════════════════════════════════════════"
 
 # 1. Rust unit & subsystem tests
-echo "[1/6] Building and running Rust unit and subsystem tests..."
+echo "[1/7] Building and running Rust unit and subsystem tests..."
 cd "${ROOT_DIR}"
 cargo build --workspace
 cargo test --workspace -- --nocapture
 
 # 2. Release integrity manifest verification test
 echo ""
-echo "[2/6] Testing release integrity verification against manifest..."
+echo "[2/7] Testing release integrity verification against manifest..."
 "${ROOT_DIR}/target/debug/cyravell-engine" verify-integrity \
   --manifest "${ROOT_DIR}/rules/cyravell_manifest.json" \
   --base-dir "${ROOT_DIR}"
 
 # 3. Extension client tests
 echo ""
-echo "[3/6] Running VS Code extension client tests..."
+echo "[3/7] Running VS Code extension client tests..."
 cd "${ROOT_DIR}/vscode-extension"
 node -e '
   const { EngineClient } = require("./out/engineClient");
@@ -43,8 +43,9 @@ node -e '
 
 # 4. End-to-end integration slice
 echo ""
-echo "[4/6] Running end-to-end vertical slice (Daemon + Test Harness)..."
+echo "[4/7] Running end-to-end vertical slice (Daemon + Test Harness)..."
 TEST_TMP_DIR="$(mktemp -d /tmp/cyravell-e2e-XXXXXX)"
+TEST_INSTALL_PREFIX=""
 TEST_SOCK="${TEST_TMP_DIR}/test.sock"
 TEST_DATA="${TEST_TMP_DIR}/data"
 mkdir -p "${TEST_DATA}"
@@ -58,10 +59,15 @@ mkdir -p "${TEST_DATA}"
 ENGINE_PID=$!
 
 cleanup() {
-  if kill -0 "${ENGINE_PID}" 2>/dev/null; then
+  if [ -n "${ENGINE_PID:-}" ] && kill -0 "${ENGINE_PID}" 2>/dev/null; then
     kill "${ENGINE_PID}" 2>/dev/null || true
   fi
-  rm -rf "${TEST_TMP_DIR}"
+  if [ -n "${TEST_TMP_DIR:-}" ]; then
+    rm -rf "${TEST_TMP_DIR}"
+  fi
+  if [ -n "${TEST_INSTALL_PREFIX:-}" ]; then
+    rm -rf "${TEST_INSTALL_PREFIX}"
+  fi
 }
 trap cleanup EXIT
 
@@ -154,12 +160,12 @@ echo "  ✓ Fail-closed prevented command when daemon is offline"
 
 # 5. Phase 3.0: Software Supply-Chain & Dependency Audit
 echo ""
-echo "[5/6] Running Phase 3.0 software supply-chain audit..."
+echo "[5/7] Running Phase 3.0 software supply-chain audit..."
 "${ROOT_DIR}/scripts/audit_dependencies.sh"
 
 # 6. Phase 3.1: Release Packaging, Independent Verification & Trust Chain
 echo ""
-echo "[6/6] Testing Phase 3.1 release packaging, independent verification & trust chain..."
+echo "[6/7] Testing Phase 3.1 release packaging, independent verification & trust chain..."
 "${ROOT_DIR}/scripts/package_release.sh" --dev "0.1.0"
 
 echo "  Testing independent standalone verifier (zero binary execution)..."
@@ -217,6 +223,65 @@ if python3 "${ROOT_DIR}/scripts/standalone_verify.py" --manifest "${TEST_ADVERSA
 fi
 rm -rf "${TEST_ADVERSARIAL_DIR}"
 echo "  ✓ Unlisted executable script in release directory rejected"
+
+# 7. Phase 3.2: Secure Installation, Updates, Rollback & Lifecycle Verification
+echo ""
+echo "[7/7] Testing Phase 3.2 secure installation, status, rollback & uninstall lifecycle..."
+TEST_INSTALL_PREFIX="$(mktemp -d /tmp/cyravell-test-install-XXXXXX)"
+
+# 7a. Test clean user-mode installation of packaged release package
+"${ROOT_DIR}/scripts/install.sh" install \
+  --release-dir "${ROOT_DIR}/dist/release-v0.1.0" \
+  --prefix "${TEST_INSTALL_PREFIX}" \
+  --user \
+  --allow-dev-keys
+
+# Verify binary and state exist
+test -x "${TEST_INSTALL_PREFIX}/bin/cyravell-engine"
+test -f "${TEST_INSTALL_PREFIX}/share/cyravell/install_state.json"
+test -f "${TEST_INSTALL_PREFIX}/share/cyravell/rules/baseline_rules.json"
+echo "  ✓ Clean installation to custom prefix verified"
+
+# 7b. Query status
+"${ROOT_DIR}/scripts/install.sh" status --prefix "${TEST_INSTALL_PREFIX}" --json >/dev/null
+echo "  ✓ Installation status query verified"
+
+# 7c. Test privilege boundary: unprivileged user attempting /usr/local system install fails
+if [ "$(id -u)" -ne 0 ]; then
+  if "${ROOT_DIR}/scripts/install.sh" install --release-dir "${ROOT_DIR}/dist/release-v0.1.0" --system --allow-dev-keys 2>/dev/null; then
+    echo "Error: Unprivileged system install to /usr/local should have failed!"
+    exit 1
+  fi
+  echo "  ✓ Privilege boundary enforcement verified (unprivileged /usr/local rejected)"
+fi
+
+# 7d. Test rollback protection with short reason
+if "${ROOT_DIR}/scripts/install.sh" rollback --prefix "${TEST_INSTALL_PREFIX}" --reason "short" 2>/dev/null; then
+  echo "Error: Rollback with short reason should have been rejected!"
+  exit 1
+fi
+echo "  ✓ Short rollback reason rejected"
+
+# 7e. Test uninstallation preserving persistent data
+mkdir -p "${TEST_INSTALL_PREFIX}/share/cyravell/data"
+echo "test audit entry" > "${TEST_INSTALL_PREFIX}/share/cyravell/data/audit.log"
+
+"${ROOT_DIR}/scripts/install.sh" uninstall --prefix "${TEST_INSTALL_PREFIX}"
+
+# Executables and state removed
+test ! -f "${TEST_INSTALL_PREFIX}/bin/cyravell-engine"
+test ! -f "${TEST_INSTALL_PREFIX}/share/cyravell/install_state.json"
+# Persistent data preserved
+test -f "${TEST_INSTALL_PREFIX}/share/cyravell/data/audit.log"
+echo "  ✓ Uninstallation removed binaries while preserving user security data"
+
+# 7f. Test uninstall with purge removes persistent data
+"${ROOT_DIR}/scripts/install.sh" uninstall --prefix "${TEST_INSTALL_PREFIX}" --purge-data
+test ! -d "${TEST_INSTALL_PREFIX}/share/cyravell/data"
+echo "  ✓ Purge uninstallation removed data directory"
+
+rm -rf "${TEST_INSTALL_PREFIX}"
+TEST_INSTALL_PREFIX=""
 
 echo ""
 echo "══════════════════════════════════════════════════════════════"

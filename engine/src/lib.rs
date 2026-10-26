@@ -5,6 +5,7 @@ pub mod analysis;
 pub mod audit;
 pub mod auth;
 pub mod gate;
+pub mod install;
 pub mod integrity;
 pub mod ipc;
 pub mod model;
@@ -12,6 +13,8 @@ pub mod package;
 pub mod policy;
 pub mod release;
 
+#[cfg(test)]
+mod install_tests;
 #[cfg(test)]
 mod ipc_auth_tests;
 #[cfg(test)]
@@ -26,6 +29,10 @@ pub use auth::{
 pub use gate::{
     ControlledShell, ExecutionBackend, ExecutionError, ExecutionGate, GateEngineClient,
     MockExecutionBackend, OsExecutionBackend,
+};
+pub use install::{
+    install_or_update, rollback_installation, uninstall, InstallError, InstallLockGuard,
+    InstallOptions, InstallReport, InstallState, InstalledFileRecord, SimpleSemVer,
 };
 pub use integrity::{compute_file_sha256, verify_manifest, IntegrityStatus};
 pub use ipc::IpcServer;

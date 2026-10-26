@@ -555,6 +555,67 @@ To audit lockfiles, third-party dependencies, and check against package advisori
 - **Status: `InvalidSignature`:** The manifest content has been modified after signing, or was signed by an unrecognized key. Check that `rules/release_signing_keys.json` contains the publisher's active key.
 - **Status: `MissingArtifact`:** A required deliverable (such as `cyravell-sbom.spdx.json` or `.vsix`) was omitted from the release archive.
 
+---
+
+## 15. Phase 3.2: Installation, Lifecycle Management, and Recovery
+
+### 15.1 Quick Installation via `scripts/install.sh`
+The authoritative, one-command installation path verifies cryptographic release signatures and installs Cyravell safely:
+
+```bash
+# 1. Unprivileged user installation (Recommended: ~/.local, no root/sudo needed):
+./scripts/install.sh install --release-dir dist/release-v0.1.0 --user
+
+# 2. System-wide installation (/usr/local, requires sudo):
+sudo ./scripts/install.sh install --release-dir dist/release-v0.1.0 --system
+
+# 3. Development / Test build installation (accepts dev signing key):
+./scripts/install.sh install --release-dir dist/release-v0.1.0 --user --allow-dev-keys
+```
+
+### 15.2 Querying Installation Status
+Inspect active versions, high-water marks, source commits, and tracked files:
+```bash
+./scripts/install.sh status
+# Or machine-readable JSON:
+./scripts/install.sh status --json
+```
+
+### 15.3 Performing an Authorized Rollback
+To revert to the previous known-good version if an upgrade behaves unexpectedly:
+```bash
+./scripts/install.sh rollback --reason "Incident 402: regression in terminal multiplexer"
+```
+The rollback engine automatically verifies the cryptographic SHA-256 digests of all backup files in `.backup/` before restoring.
+
+### 15.4 Uninstallation and Data Purging
+```bash
+# Safe uninstallation (removes binaries & rules; PRESERVES user audit logs & persistent security state):
+./scripts/install.sh uninstall
+
+# Purge uninstallation (completely removes binaries, rules, audit logs, and baselines):
+./scripts/install.sh uninstall --purge-data
+```
+
+### 15.5 Troubleshooting Installation Issues
+
+- **Error: `Privilege Boundary Error: System installation to '/usr/local' requires root privileges`:**
+  - *Cause:* Running system install as an unprivileged user without `sudo`.
+  - *Fix:* Re-run with `sudo`, or use `--user` to install to `~/.local` without root privileges.
+- **Error: `Downgrade rejected: Active version is '0.2.0', candidate version is older '0.1.0'`:**
+  - *Cause:* Cyravell strictly blocks accidental or unauthorized downgrades.
+  - *Fix:* If downgrade is intentionally required for incident recovery, pass `--allow-downgrade --reason "<Descriptive reason of at least 8 characters>"`.
+- **Error: `Installation lock is busy: Another Cyravell installation operation is running with PID <PID>`:**
+  - *Cause:* Another install, upgrade, or rollback process is running or holding `.install.lock`.
+  - *Fix:* Wait for the active process to complete. If the previous process crashed, the lock will automatically be reclaimed once the PID is confirmed dead.
+- **Error: `Security violation: Path component or file is an unsafe symbolic link`:**
+  - *Cause:* An existing symlink was encountered in the target path or within the release package.
+  - *Fix:* Cyravell strictly prohibits writing through or to symbolic links to prevent link-hijacking attacks. Remove the symlink before continuing.
+- **Error: `Sanity check failed: Activated binary failed health check; rolled back to previous version`:**
+  - *Cause:* Newly activated binary failed execution (`cyravell-engine --version`).
+  - *Fix:* The engine automatically rolls back to the last known-good backup. Check architecture compatibility (`x86_64-unknown-linux-gnu`) and dynamic library dependencies on your system.
+
+
 
 
 
