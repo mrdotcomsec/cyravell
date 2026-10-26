@@ -661,6 +661,23 @@ Phase 3.0 secures the build, packaging, signing, and verification pipeline for a
    - `scripts/audit_dependencies.sh` enforces committed lockfiles, `cargo check --locked`, zero wildcard dependencies, registry conformance, and clean `npm audit`.
    - `scripts/verify_release.sh` and `cyravell-engine verify-release` provide offline pre-installation validation.
 
+### 14.2 Phase 3.1: Release Trust Chain and Independent Verification Hardening
+Phase 3.1 hardens the release verification pipeline and eliminates pre-installation bootstrap vulnerabilities:
+1. **Independent Standalone Verification Path (`scripts/standalone_verify.py`):**
+   - Pure Python 3 + `cryptography` tool that validates manifests, Ed25519 signatures, and SHA-256 digests without executing any downloaded executable.
+   - Eliminates the bootstrap circular dependency where users had to execute downloaded binaries to verify them.
+2. **Cryptographic Key Separation & Official Tier Enforcement:**
+   - Production official keys (`cyravell-release-official-2026`) marked `is_official: true`.
+   - Development/test keys (`cyravell-dev-test-2026`) marked `is_official: false`.
+   - Engine and standalone verifier default to requiring official keys; dev keys are rejected with `ReleaseStatus::UntrustedKey` unless `--allow-dev-keys` is explicitly provided.
+3. **Filesystem Security Controls:**
+   - Both verifiers inspect filesystem metadata with `lstat`/`symlink_metadata`.
+   - Symbolic links, special files (FIFOs, devices), and unlisted executable scripts (`.sh`, `.bin`, `.py`, `.exe`, `.so`) trigger immediate `SecurityCheckFailed`.
+4. **Git State & Packaging Invariants:**
+   - Official packaging requires clean Git working tree (`git status --porcelain` empty), exact tag match on `HEAD`, and `CYRAVELL_RELEASE_SIGNING_KEY` present.
+   - Build and packaging steps execute in an environment where signing secrets are isolated and unset.
+
+
 
 
 

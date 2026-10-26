@@ -500,15 +500,26 @@ Cyravell's engine verifies operating system identity and filesystem security inv
 
 ---
 
-## 14. Phase 3.0: Release Verification & Software Supply-Chain Setup
+## 14. Phase 3.1: Release Verification & Software Supply-Chain Setup
 
 ### 14.1 Verifying an Official Cyravell Release Package
-Before installing binaries or extensions, always verify the cryptographic signature and bit-for-bit file digests:
-```bash
-# 1. Run the official verification script
-./scripts/verify_release.sh /path/to/cyravell-release-v0.1.0 0.1.0
+Before installing binaries or extensions, always verify the cryptographic signature and bit-for-bit file digests.
 
-# 2. Or verify directly using cyravell-engine
+**Option A: Independent Standalone Verifier (Recommended — Zero Downloaded Binary Execution):**
+```bash
+python3 scripts/standalone_verify.py \
+  --manifest /path/to/cyravell-release-v0.1.0/release_manifest.json \
+  --artifacts-dir /path/to/cyravell-release-v0.1.0 \
+  --expected-version 0.1.0
+```
+
+**Option B: Standard Verification Script:**
+```bash
+./scripts/verify_release.sh --dir /path/to/cyravell-release-v0.1.0 --expected-version 0.1.0
+```
+
+**Option C: Authoritative Engine CLI (If already installed):**
+```bash
 cyravell-engine verify-release \
   --manifest /path/to/cyravell-release-v0.1.0/release_manifest.json \
   --artifacts-dir /path/to/cyravell-release-v0.1.0 \
@@ -516,10 +527,14 @@ cyravell-engine verify-release \
 ```
 
 ### 14.2 Generating Release Deliverables Locally
-To package reproducible release deliverables from a clean checkout:
+To package reproducible release deliverables:
 ```bash
-# Packages binaries, .vsix, rules bundle, SPDX 2.3 SBOM, and signed release manifest
-./scripts/package_release.sh 0.1.0
+# 1. Official production release (requires clean git tree, git tag v0.1.0, and CYRAVELL_RELEASE_SIGNING_KEY in env):
+export CYRAVELL_RELEASE_SIGNING_KEY="<production-hex-private-key>"
+./scripts/package_release.sh --official 0.1.0
+
+# 2. Local development/test build (permits dirty tree, uses development test key):
+./scripts/package_release.sh --dev 0.1.0
 ```
 Outputs are placed in `dist/release-v0.1.0/` alongside `release_manifest.json`, `release_manifest.json.sig`, and `SHA256SUMS`.
 
@@ -530,10 +545,16 @@ To audit lockfiles, third-party dependencies, and check against package advisori
 ```
 
 ### 14.4 Troubleshooting Release Verification Failures
+- **Status: `UntrustedKey`:** The manifest was signed by a development/test key (`cyravell-dev-test-2026`) instead of an official release key. If verifying a development build, pass `--allow-dev-keys`. Never install development builds in production.
+- **Status: `SecurityCheckFailed`:** A critical security violation was detected:
+  - An artifact is a symbolic link or non-regular file.
+  - A path traversal sequence (`..` or `/`) was detected in an artifact filename.
+  - An unlisted executable script (`.sh`, `.bin`, `.py`, `.exe`, `.so`) was found in the release directory.
+  - **Resolution:** Reject the archive immediately.
 - **Status: `TamperedArtifact`:** One or more files in the release directory have a byte size or SHA-256 digest differing from the publisher's signed manifest. Do **NOT** execute the artifacts. Re-download from an authentic channel.
 - **Status: `InvalidSignature`:** The manifest content has been modified after signing, or was signed by an unrecognized key. Check that `rules/release_signing_keys.json` contains the publisher's active key.
 - **Status: `MissingArtifact`:** A required deliverable (such as `cyravell-sbom.spdx.json` or `.vsix`) was omitted from the release archive.
-- **Status: `SecurityCheckFailed`:** A path traversal sequence (`..` or `/`) was detected in an artifact name. This indicates an invalid or adversarial manifest.
+
 
 
 

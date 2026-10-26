@@ -275,3 +275,21 @@ Phase 3.0 addresses software supply-chain threats targeting Cyravell's release a
    - *Threat:* Inability to verify whether a distributed binary was compiled from reviewed source revision.
    - *Mitigation:* Bit-for-bit identical compilation achieved via `--remap-path-prefix` and `SOURCE_DATE_EPOCH`; deterministic ZIP packaging for `.vsix`. Full machine-readable SPDX 2.3 SBOM generated with package-manager PURLs.
 
+### 10.2 Phase 3.1 Hardened Release Threats & Defenses
+1. **Pre-Installation Binary Execution (Bootstrap Vulnerability):**
+   - *Threat:* Running an unverified downloaded binary to verify the download package enables pre-installation code execution attacks.
+   - *Mitigation:* `scripts/standalone_verify.py` provides independent verification via Python standard library + `cryptography`, requiring zero downloaded binary execution.
+2. **Tag Hijacking & Revision Discrepancy:**
+   - *Threat:* A malicious or accidental release tag points to an unreviewed commit or does not match the manifest's declared source commit.
+   - *Mitigation:* Release pipeline asserts `TAG_COMMIT == GITHUB_SHA` and verifies ancestry against `main`/`master`. Working tree must be clean.
+3. **Development Key Confusion:**
+   - *Threat:* Non-production releases signed by test keys masquerade as official releases.
+   - *Mitigation:* Cryptographic separation with `is_official: bool` in keystores and `signing_mode: "official"` in manifests. Fails closed with `ReleaseStatus::UntrustedKey`.
+4. **Symbolic Link & Special File Injection:**
+   - *Threat:* Release directories contain symlinks targeting `/etc/passwd` or outside directories to bypass integrity checks or leak files.
+   - *Mitigation:* `symlink_metadata` strictly rejects symbolic links, FIFOs, sockets, and character/block devices as `ReleaseStatus::SecurityCheckFailed`.
+5. **Unlisted Executable Trojans:**
+   - *Threat:* An attacker injects hidden `.sh`, `.bin`, `.py`, or `.so` files into the release archive.
+   - *Mitigation:* Release directory scanning detects and rejects unlisted executable files with `ReleaseStatus::SecurityCheckFailed`.
+
+

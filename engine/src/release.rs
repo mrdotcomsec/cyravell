@@ -53,6 +53,11 @@ pub struct CyravellReleaseManifest {
     pub build_timestamp: String,
     pub engine_version: String,
     pub extension_version: String,
+    #[serde(
+        default = "default_signing_mode",
+        skip_serializing_if = "Option::is_none"
+    )]
+    pub signing_mode: Option<String>,
     pub target_platforms: Vec<String>,
     pub artifacts: BTreeMap<String, ReleaseArtifact>,
     pub required_runtime_components: Vec<String>,
@@ -62,6 +67,10 @@ pub struct CyravellReleaseManifest {
     pub signing_key_id: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub signature: Option<String>,
+}
+
+fn default_signing_mode() -> Option<String> {
+    Some("official".to_string())
 }
 
 impl CyravellReleaseManifest {
@@ -80,6 +89,10 @@ impl CyravellReleaseManifest {
         out.push_str(&format!("build_timestamp:{}\n", self.build_timestamp));
         out.push_str(&format!("engine_version:{}\n", self.engine_version));
         out.push_str(&format!("extension_version:{}\n", self.extension_version));
+        out.push_str(&format!(
+            "signing_mode:{}\n",
+            self.signing_mode.as_deref().unwrap_or("official")
+        ));
         out.push_str("target_platforms:");
         for (i, tp) in self.target_platforms.iter().enumerate() {
             if i > 0 {
@@ -154,6 +167,12 @@ pub struct ReleaseKey {
     pub created_at: String,
     pub expires_at: Option<String>,
     pub is_active: bool,
+    #[serde(default = "default_is_official")]
+    pub is_official: bool,
+}
+
+fn default_is_official() -> bool {
+    true
 }
 
 #[derive(Debug, Clone)]
@@ -393,6 +412,8 @@ pub struct ReleaseVerificationReport {
     pub source_commit: String,
     pub signing_key_id: Option<String>,
     pub publisher: Option<String>,
+    pub is_official: bool,
+    pub signing_mode: Option<String>,
     pub verified_artifacts_count: usize,
     pub mismatched_artifacts: Vec<String>,
     pub missing_artifacts: Vec<String>,
@@ -408,6 +429,7 @@ pub fn verify_release_package(
     keystore: &ReleaseKeyStore,
     expected_version: Option<&str>,
     expected_commit: Option<&str>,
+    require_official: bool,
 ) -> ReleaseVerificationReport {
     let mut errors = Vec::new();
 
@@ -419,6 +441,8 @@ pub fn verify_release_package(
             source_commit: "unknown".to_string(),
             signing_key_id: None,
             publisher: None,
+            is_official: false,
+            signing_mode: None,
             verified_artifacts_count: 0,
             mismatched_artifacts: Vec::new(),
             missing_artifacts: vec![manifest_path.display().to_string()],
@@ -438,6 +462,8 @@ pub fn verify_release_package(
                 source_commit: "unknown".to_string(),
                 signing_key_id: None,
                 publisher: None,
+                is_official: false,
+                signing_mode: None,
                 verified_artifacts_count: 0,
                 mismatched_artifacts: Vec::new(),
                 missing_artifacts: Vec::new(),
@@ -456,6 +482,8 @@ pub fn verify_release_package(
             source_commit: "unknown".to_string(),
             signing_key_id: None,
             publisher: None,
+            is_official: false,
+            signing_mode: None,
             verified_artifacts_count: 0,
             mismatched_artifacts: Vec::new(),
             missing_artifacts: Vec::new(),
@@ -475,6 +503,8 @@ pub fn verify_release_package(
                 source_commit: "unknown".to_string(),
                 signing_key_id: None,
                 publisher: None,
+                is_official: false,
+                signing_mode: None,
                 verified_artifacts_count: 0,
                 mismatched_artifacts: Vec::new(),
                 missing_artifacts: Vec::new(),
@@ -513,21 +543,41 @@ pub fn verify_release_package(
         }
     }
 
+    // Check signing mode
+    if require_official && manifest.signing_mode.as_deref() == Some("development") {
+        errors.push("Manifest specifies development signing mode; official verification requires official mode".to_string());
+    }
+
     // Verify cryptographic signature
-    let (signing_key_id, publisher) = match (&manifest.signing_key_id, &manifest.signature) {
+    let (signing_key_id, publisher, is_official_key) = match (
+        &manifest.signing_key_id,
+        &manifest.signature,
+    ) {
         (Some(key_id), Some(sig_hex)) => {
             let canonical_bytes = manifest.canonical_signing_bytes();
             match keystore.verify_signature(key_id, &canonical_bytes, sig_hex) {
-                Ok(key) => (Some(key_id.clone()), Some(key.publisher.clone())),
+                Ok(key) => {
+                    if require_official && !key.is_official {
+                        errors.push(format!(
+                            "Untrusted key role: Key '{}' is designated as development/test only; official production release signing key is required",
+                            key_id
+                        ));
+                    }
+                    (
+                        Some(key_id.clone()),
+                        Some(key.publisher.clone()),
+                        key.is_official,
+                    )
+                }
                 Err(err) => {
                     errors.push(format!("Signature verification failure: {}", err));
-                    (Some(key_id.clone()), None)
+                    (Some(key_id.clone()), None, false)
                 }
             }
         }
         (None, _) | (_, None) => {
             errors.push("Release manifest is unsigned or missing key ID".to_string());
-            (None, None)
+            (None, None, false)
         }
     };
 
@@ -549,6 +599,8 @@ pub fn verify_release_package(
                 source_commit: manifest.source_commit,
                 signing_key_id,
                 publisher,
+                is_official: is_official_key,
+                signing_mode: manifest.signing_mode,
                 verified_artifacts_count: 0,
                 mismatched_artifacts: Vec::new(),
                 missing_artifacts: Vec::new(),
@@ -571,8 +623,8 @@ pub fn verify_release_package(
             continue;
         }
 
-        // Check size
-        let metadata = match std::fs::metadata(&art_path) {
+        // Symlink and special file check using symlink_metadata
+        let sym_meta = match std::fs::symlink_metadata(&art_path) {
             Ok(m) => m,
             Err(e) => {
                 errors.push(format!("Failed to stat artifact '{}': {}", name, e));
@@ -581,12 +633,61 @@ pub fn verify_release_package(
             }
         };
 
-        if metadata.len() != artifact.size_bytes {
+        if sym_meta.file_type().is_symlink() {
+            errors.push(format!(
+                "Security violation: artifact '{}' is a symbolic link",
+                name
+            ));
+            return ReleaseVerificationReport {
+                status: ReleaseStatus::SecurityCheckFailed,
+                product_name: manifest.product_name,
+                release_version: manifest.release_version,
+                source_commit: manifest.source_commit,
+                signing_key_id,
+                publisher,
+                is_official: is_official_key,
+                signing_mode: manifest.signing_mode,
+                verified_artifacts_count: verified_count,
+                mismatched_artifacts: vec![artifact.filename.clone()],
+                missing_artifacts,
+                unlisted_artifacts: Vec::new(),
+                errors,
+                details: format!("Security violation: artifact '{}' is a symbolic link", name),
+            };
+        }
+
+        if !sym_meta.file_type().is_file() {
+            errors.push(format!(
+                "Security violation: artifact '{}' is not a regular file",
+                name
+            ));
+            return ReleaseVerificationReport {
+                status: ReleaseStatus::SecurityCheckFailed,
+                product_name: manifest.product_name,
+                release_version: manifest.release_version,
+                source_commit: manifest.source_commit,
+                signing_key_id,
+                publisher,
+                is_official: is_official_key,
+                signing_mode: manifest.signing_mode,
+                verified_artifacts_count: verified_count,
+                mismatched_artifacts: vec![artifact.filename.clone()],
+                missing_artifacts,
+                unlisted_artifacts: Vec::new(),
+                errors,
+                details: format!(
+                    "Security violation: artifact '{}' is not a regular file",
+                    name
+                ),
+            };
+        }
+
+        if sym_meta.len() != artifact.size_bytes {
             errors.push(format!(
                 "Artifact size mismatch for '{}': manifest expects {} bytes, file is {} bytes",
                 name,
                 artifact.size_bytes,
-                metadata.len()
+                sym_meta.len()
             ));
             mismatched_artifacts.push(artifact.filename.clone());
             continue;
@@ -620,23 +721,57 @@ pub fn verify_release_package(
         }
         errors.push(format!("SBOM file '{}' is missing", manifest.sbom.filename));
     } else {
-        match compute_sha256(&sbom_path) {
-            Ok(digest) => {
-                if digest.to_lowercase() != manifest.sbom.sha256.to_lowercase() {
-                    if !mismatched_artifacts.contains(&manifest.sbom.filename) {
-                        mismatched_artifacts.push(manifest.sbom.filename.clone());
-                    }
-                    errors.push(format!(
-                        "SBOM SHA-256 mismatch: manifest expects {}, file is {}",
-                        manifest.sbom.sha256, digest
-                    ));
-                }
-            }
+        let sbom_sym_meta = match std::fs::symlink_metadata(&sbom_path) {
+            Ok(m) => m,
             Err(e) => {
                 errors.push(format!(
-                    "Failed to hash SBOM '{}': {}",
+                    "Failed to stat SBOM '{}': {}",
                     manifest.sbom.filename, e
                 ));
+                return ReleaseVerificationReport {
+                    status: ReleaseStatus::SecurityCheckFailed,
+                    product_name: manifest.product_name,
+                    release_version: manifest.release_version,
+                    source_commit: manifest.source_commit,
+                    signing_key_id,
+                    publisher,
+                    is_official: is_official_key,
+                    signing_mode: manifest.signing_mode,
+                    verified_artifacts_count: verified_count,
+                    mismatched_artifacts,
+                    missing_artifacts,
+                    unlisted_artifacts: Vec::new(),
+                    errors,
+                    details: "SBOM metadata failure".to_string(),
+                };
+            }
+        };
+
+        if sbom_sym_meta.file_type().is_symlink() || !sbom_sym_meta.file_type().is_file() {
+            errors.push(format!(
+                "Security violation: SBOM '{}' is a symbolic link or non-regular file",
+                manifest.sbom.filename
+            ));
+            mismatched_artifacts.push(manifest.sbom.filename.clone());
+        } else {
+            match compute_sha256(&sbom_path) {
+                Ok(digest) => {
+                    if digest.to_lowercase() != manifest.sbom.sha256.to_lowercase() {
+                        if !mismatched_artifacts.contains(&manifest.sbom.filename) {
+                            mismatched_artifacts.push(manifest.sbom.filename.clone());
+                        }
+                        errors.push(format!(
+                            "SBOM SHA-256 mismatch: manifest expects {}, file is {}",
+                            manifest.sbom.sha256, digest
+                        ));
+                    }
+                }
+                Err(e) => {
+                    errors.push(format!(
+                        "Failed to hash SBOM '{}': {}",
+                        manifest.sbom.filename, e
+                    ));
+                }
             }
         }
     }
@@ -650,20 +785,37 @@ pub fn verify_release_package(
             .unwrap_or("release_manifest.json");
 
         for entry in entries.flatten() {
-            if let Ok(file_type) = entry.file_type() {
-                if file_type.is_file() {
-                    if let Some(name) = entry.file_name().to_str() {
-                        // Skip manifest, detached signature, and sha256 checksum files
-                        if name == manifest_filename
-                            || name.ends_with(".sig")
-                            || name.ends_with(".sha256")
-                        {
-                            continue;
-                        }
-                        if !manifest.artifacts.contains_key(name) && name != manifest.sbom.filename
-                        {
-                            unlisted_artifacts.push(name.to_string());
-                        }
+            let p = entry.path();
+            let is_sym = p.is_symlink();
+            if let Some(name) = entry.file_name().to_str() {
+                // Skip manifest, detached signature, and sha256 checksum files
+                if name == manifest_filename
+                    || name.ends_with(".sig")
+                    || name.ends_with(".sha256")
+                    || name == "SHA256SUMS"
+                    || name == "SHA256SUMS.sig"
+                {
+                    continue;
+                }
+                if !manifest.artifacts.contains_key(name) && name != manifest.sbom.filename {
+                    unlisted_artifacts.push(name.to_string());
+                    if is_sym {
+                        errors.push(format!(
+                            "Security violation: unlisted symbolic link '{}' in release directory",
+                            name
+                        ));
+                    } else if name.ends_with(".sh")
+                        || name.ends_with(".bin")
+                        || name.ends_with(".py")
+                        || name.ends_with(".exe")
+                        || name.ends_with(".so")
+                    {
+                        errors.push(format!("Security violation: unlisted executable file '{}' found in release directory", name));
+                    } else if require_official {
+                        errors.push(format!(
+                            "Security violation: unlisted file '{}' in official release directory",
+                            name
+                        ));
                     }
                 }
             }
@@ -677,6 +829,8 @@ pub fn verify_release_package(
         ReleaseStatus::TamperedArtifact
     } else if signing_key_id.is_none() || publisher.is_none() {
         ReleaseStatus::InvalidSignature
+    } else if require_official && !is_official_key {
+        ReleaseStatus::UntrustedKey
     } else if !errors.is_empty() {
         ReleaseStatus::SecurityCheckFailed
     } else {
@@ -684,12 +838,20 @@ pub fn verify_release_package(
     };
 
     let details = match status {
-        ReleaseStatus::Verified => format!(
-            "All {} artifacts verified bit-for-bit against release manifest. Authenticated by publisher '{}' ({:?})",
-            verified_count,
-            publisher.as_deref().unwrap_or("unknown"),
-            signing_key_id.as_deref().unwrap_or("none")
-        ),
+        ReleaseStatus::Verified => {
+            let mode_desc = if is_official_key {
+                "OFFICIAL RELEASE"
+            } else {
+                "DEVELOPMENT / TEST BUILD (NON-PRODUCTION)"
+            };
+            format!(
+                "All {} artifacts verified bit-for-bit against release manifest. Authenticated by publisher '{}' ({}) [{}]",
+                verified_count,
+                publisher.as_deref().unwrap_or("unknown"),
+                signing_key_id.as_deref().unwrap_or("none"),
+                mode_desc
+            )
+        }
         ReleaseStatus::TamperedArtifact => format!(
             "Digest or size mismatch detected in {} artifact(s): {:?}",
             mismatched_artifacts.len(),
@@ -704,9 +866,14 @@ pub fn verify_release_package(
             "Release signature invalid, missing, or key untrusted: {}",
             errors.join("; ")
         ),
-        ReleaseStatus::UntrustedKey => "Publisher signing key is not recognized or revoked".to_string(),
+        ReleaseStatus::UntrustedKey => format!(
+            "Publisher signing key untrusted for requested verification tier: {}",
+            errors.join("; ")
+        ),
         ReleaseStatus::MalformedManifest => "Malformed manifest file".to_string(),
-        ReleaseStatus::SecurityCheckFailed => format!("Security validation checks failed: {}", errors.join("; ")),
+        ReleaseStatus::SecurityCheckFailed => {
+            format!("Security validation checks failed: {}", errors.join("; "))
+        }
     };
 
     ReleaseVerificationReport {
@@ -716,6 +883,8 @@ pub fn verify_release_package(
         source_commit: manifest.source_commit,
         signing_key_id,
         publisher,
+        is_official: is_official_key,
+        signing_mode: manifest.signing_mode,
         verified_artifacts_count: verified_count,
         mismatched_artifacts,
         missing_artifacts,
@@ -733,6 +902,7 @@ pub fn generate_release_manifest(
     source_tag: Option<&str>,
     target_platform: &str,
     sbom_filename: &str,
+    signing_mode: Option<&str>,
 ) -> Result<CyravellReleaseManifest, String> {
     if !artifacts_dir.exists() {
         return Err(format!(
@@ -749,23 +919,35 @@ pub fn generate_release_manifest(
 
     for entry in entries.flatten() {
         let p = entry.path();
-        if !p.is_file() {
-            continue;
-        }
-
         let fname = match p.file_name().and_then(|n| n.to_str()) {
             Some(n) => n.to_string(),
             None => continue,
         };
 
-        if fname == "release_manifest.json" || fname.ends_with(".sig") || fname.ends_with(".sha256")
+        if fname == "release_manifest.json"
+            || fname.ends_with(".sig")
+            || fname.ends_with(".sha256")
+            || fname == "SHA256SUMS"
+            || fname == "SHA256SUMS.sig"
         {
             continue;
         }
 
-        let metadata =
-            std::fs::metadata(&p).map_err(|e| format!("Failed to stat '{}': {}", fname, e))?;
-        let size_bytes = metadata.len();
+        let sym_meta = std::fs::symlink_metadata(&p)
+            .map_err(|e| format!("Failed to stat '{}': {}", fname, e))?;
+
+        if sym_meta.file_type().is_symlink() {
+            return Err(format!(
+                "Security violation: artifact '{}' is a symbolic link",
+                fname
+            ));
+        }
+
+        if !sym_meta.file_type().is_file() {
+            continue;
+        }
+
+        let size_bytes = sym_meta.len();
         let digest = compute_sha256(&p)
             .map_err(|e| format!("Failed to compute SHA-256 for '{}': {}", fname, e))?;
 
@@ -832,6 +1014,7 @@ pub fn generate_release_manifest(
         build_timestamp: Utc::now().to_rfc3339(),
         engine_version: release_version.to_string(),
         extension_version: release_version.to_string(),
+        signing_mode: Some(signing_mode.unwrap_or("official").to_string()),
         target_platforms: vec![target_platform.to_string()],
         artifacts,
         required_runtime_components: vec![

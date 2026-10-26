@@ -1,20 +1,20 @@
 # Cyravell Release Security & Software Supply-Chain Architecture
 
-**Document Version:** 1.0.0  
-**Phase:** Phase 3.0 (Release Integrity and Software Supply-Chain Security)  
+**Document Version:** 1.1.0  
+**Phase:** Phase 3.1 (Release Trust Chain and Independent Verification Hardening)  
 **Classification:** Public Engineering & Security Documentation  
 
 ---
 
 ## 1. Executive Summary
 
-Cyravell is an open-source, local-first security monitoring system for AI coding agents. Because Cyravell intercepts terminal execution and governs package-manager operations, the integrity and provenance of Cyravell's own release artifacts are critical. A compromised security monitor would undermine the security boundary of developer workspaces.
+Cyravell is an open-source, local-first security monitoring system for AI coding agents. Because Cyravell intercepts terminal execution and governs package-manager operations, the integrity and provenance of Cyravell's own release artifacts are critical. A compromised security monitor would undermine the security boundary of developer workstations.
 
-Phase 3.0 establishes an end-to-end, cryptographically verifiable release process that protects users against:
-- Compromised or drifting third-party dependencies.
-- Accidental release of untested code or failing security gates.
-- Artifact substitution and man-in-the-middle distribution attacks.
-- Ambiguity regarding whether an installed binary corresponds to a reviewed source revision.
+Phase 3.0 established release manifest signing, SBOM generation, and CI automation. **Phase 3.1 hardens the release trust chain and independent verification path**, ensuring users can independently determine:
+- Which exact source revision produced a release.
+- Whether the release was authorized by the official publisher key.
+- Whether downloaded artifacts have been modified, swapped, or weaponized with symlinks.
+- How to verify downloads **without ever executing downloaded binaries before verification**.
 
 ---
 
@@ -22,20 +22,22 @@ Phase 3.0 establishes an end-to-end, cryptographically verifiable release proces
 
 Cyravell strictly separates cryptographic authorities according to operational scope and lifecycle requirements:
 
-| Authority Scope | Key Configuration File | Trusted Key ID | Primary Purpose | Cryptographic Algorithm |
-| :--- | :--- | :--- | :--- | :--- |
-| **Release Signing Authority** | `rules/release_signing_keys.json` | `cyravell-release-official-2026` | Authenticating distributed deliverables (engine, test harness, `.vsix`, rules bundle, SBOM) | Ed25519 (RFC 8032) |
-| **Package Advisory Authority** | `rules/trusted_keys.json` | `cyravell-sec-official-2026` | Authenticating threat intelligence and package vulnerability bundles | Ed25519 (RFC 8032) |
-| **Runtime Audit Chain** | Local engine state | Genesis SHA-256 | Tamper-evident local event ledger | SHA-256 Merkle chain |
+| Authority Scope | Key Configuration File | Trusted Key ID | Official Publisher? | Primary Purpose | Algorithm |
+| :--- | :--- | :--- | :--- | :--- | :--- |
+| **Official Release Authority** | `rules/release_signing_keys.json` | `cyravell-release-official-2026` | **Yes (`is_official: true`)** | Production releases published for end users | Ed25519 (RFC 8032) |
+| **Development & Test Authority** | `rules/release_signing_keys.json` | `cyravell-dev-test-2026` | **No (`is_official: false`)** | Local development, CI test runs, non-production packaging | Ed25519 (RFC 8032) |
+| **Package Advisory Authority** | `rules/trusted_keys.json` | `cyravell-sec-official-2026` | Dedicated Scope | Package threat intelligence & vulnerability advisories | Ed25519 (RFC 8032) |
+| **Runtime Audit Chain** | Local engine state | Genesis SHA-256 | Internal State | Tamper-evident local event ledger | SHA-256 Merkle chain |
 
-### Strict Domain Separation
+### Strict Domain & Role Separation
+- **Official vs. Development Key Enforcement:** By default, release verification requires an official publisher key (`is_official: true`). Manifests signed by development/test keys are rejected with `ReleaseStatus::UntrustedKey` unless `--allow-dev-keys` is explicitly provided.
 - **Release keys cannot sign advisory bundles:** The `AdvisoryUpdater` strictly consults `TrustedKeyStore` which rejects release keys.
 - **Advisory keys cannot sign releases:** The `ReleaseKeyStore` strictly consults `rules/release_signing_keys.json` and rejects advisory publisher keys.
 - **Cross-Role Confusion Immunity:** Both keystores validate key ID membership and algorithm type before checking signatures.
 
 ### Key Lifecycle Management & Provisioning
 1. **Public Key Distribution:** Trusted public keys are committed to `rules/release_signing_keys.json` and compiled into the engine binary as an embedded immutable fallback (`ReleaseKeyStore::load_embedded`).
-2. **Private Key Protection:** Private signing keys are **NEVER** committed to version control. In release environments, the private key is provisioned via an encrypted CI secret or hardware security module (HSM) and passed via the `CYRAVELL_RELEASE_SIGNING_KEY` environment variable.
+2. **Private Key Protection:** Official private signing keys are **NEVER** committed to version control. In release environments, the private key is provisioned via an encrypted CI secret or hardware security module (HSM) and passed via the `CYRAVELL_RELEASE_SIGNING_KEY` environment variable.
 3. **Revocation & Expiration:** Release keys support explicit revocation (`"is_active": false`) and cryptographic expiration timestamps (`"expires_at": "..."`). Any key past expiration or marked inactive fails closed (`ReleaseStatus::InvalidSignature`).
 
 ---
@@ -53,9 +55,10 @@ Every release produces a canonical `release_manifest.json` inventory cataloging 
 - `build_timestamp`: UTC ISO-8601 build timestamp.
 - `engine_version`: Cyravell engine version.
 - `extension_version`: Cyravell VS Code extension version.
+- `signing_mode`: Manifest tier (`"official"` or `"development"`).
 - `target_platforms`: Supported platform triples (e.g., `["x86_64-unknown-linux-gnu"]`).
 - `artifacts`: Map of filename to `ReleaseArtifact`:
-  - `filename`: Base name of the file (path traversal sequences rejected).
+  - `filename`: Base name of the file (path traversal sequences and symlinks rejected).
   - `size_bytes`: Exact byte length computed from final artifact.
   - `sha256`: Hexadecimal SHA-256 digest computed from final artifact.
   - `artifact_type`: Categorization (`binary`, `extension`, `archive`, `sbom`).
@@ -77,6 +80,7 @@ source_tag:<source_tag>
 build_timestamp:<build_timestamp>
 engine_version:<engine_version>
 extension_version:<extension_version>
+signing_mode:<signing_mode>
 target_platforms:<p1>,<p2>,...
 artifacts:
 <filename>:<size_bytes>:<sha256_lower>:<artifact_type>:<platform>
@@ -101,122 +105,107 @@ The SBOM is generated deterministically by `scripts/generate_sbom.sh`:
 - **Primary Deliverables:** Cataloged with license declaration (`Apache-2.0`), supplier, and `DESCRIBES` relationships.
 - **Dependency Relationships:** Explicit `DEPENDS_ON` relationships linking primary packages to all transitive runtime dependencies.
 
-### SBOM Validation & Invariants
-- Generated SBOMs must contain valid SPDX 2.3 identifiers, document namespaces, and creator tags.
-- The SBOM's SHA-256 digest is embedded in `release_manifest.json` and validated during release verification.
-- **Security Limitation:** An SBOM is an inventory, not proof that components are bug-free or vulnerability-free.
-
 ---
 
 ## 5. Build Provenance & Binary Reproducibility
 
 ### Empirical Reproducibility Assessment
-During Phase 3.0, independent clean builds of `cyravell-engine` were evaluated across isolated build directories.
-- **Rust Compiler Flags:** Setting `RUSTFLAGS="--remap-path-prefix=${ROOT_DIR}=/cyravell-build"` eliminates host-specific directory paths from debug symbols and panic backtraces.
+- **Path Remapping:** Setting `RUSTFLAGS="--remap-path-prefix=${ROOT_DIR}=/cyravell-build"` eliminates host-specific directory paths from debug symbols and panic backtraces.
 - **Timestamp Normalization:** Setting `SOURCE_DATE_EPOCH=1767225600` (2026-01-01T00:00:00Z) normalizes build timestamps.
-- **Evidence:** Two independent clean release builds produced bit-for-bit identical SHA-256 digests:
-  - Run 1: `1ddc8562564d3a06ba9355ac4cf380aec331e3388716ef1c59cb84184a400469`
-  - Run 2: `1ddc8562564d3a06ba9355ac4cf380aec331e3388716ef1c59cb84184a400469`
-  - Status: Bit-for-bit identical (`Identical: True`).
-
-### Extension Packaging Reproducibility (.vsix)
-The VS Code extension (`cyravell-0.1.0.vsix`) is an Open Packaging Conventions (OPC) ZIP archive. Because default zip tools record current timestamps and nondeterministic directory traversals:
-1. `scripts/package_release.sh` normalizes all staging file timestamps to `2026-01-01 00:00:00 UTC`.
-2. Staging entries are sorted lexicographically (`find . -type f | LC_ALL=C sort | zip -X -9 ...`).
-3. Output `.vsix` packages achieve consistent checksums across packaging runs on equivalent toolchains.
-
-### Known Limitations
-- Toolchain differences (different `rustc`, `node`, or libc versions) may produce different binary outputs.
-- Future native C dependencies or build scripts executing host commands could reintroduce nondeterminism unless strictly constrained.
+- **Extension Packaging (.vsix):** Normalized timestamps and lexicographically sorted entries inside the OPC zip archive prevent packaging jitter.
 
 ---
 
-## 6. Dependency and Build-Input Security
+## 6. Hardened Packaging Workflow (`scripts/package_release.sh`)
 
-The dependency audit script (`scripts/audit_dependencies.sh`) runs both locally and as a mandatory CI gate:
-
-1. **Lockfile Enforcement:** Verifies `Cargo.lock` and `vscode-extension/package-lock.json` are committed and tracked in Git.
-2. **Deterministic Resolution:** Executes `cargo check --locked --workspace`. Any unreviewed dependency update causes immediate failure.
-3. **Registry Conformance:** Scans `Cargo.lock` ensuring all third-party crates originate from the official `crates.io` registry. Rejects unreviewed Git repositories or unpinned mutable tags.
-4. **Zero Wildcard Versions:** Scans all `Cargo.toml` files to reject wildcard versions (`version = "*"`).
-5. **npm Security Audit:** Runs `npm audit` against the extension dependency tree, enforcing 0 vulnerabilities.
-6. **Lifecycle Hook Inspection:** Inspects `package.json` for dangerous install hooks (`preinstall`, `postinstall`, `install`).
-7. **Advisory Database Cross-Referencing:** Cross-checks active workspace dependencies against Cyravell's own package security advisory database (`rules/package_advisories.json`).
+Official packaging enforces strict security and repository integrity preconditions:
+1. **Clean Working Tree Requirement:** Rejects packaging if `git status --porcelain` is non-empty. Official releases must come from committed code.
+2. **Exact Tag Matching:** Verifies that tag `v${RELEASE_VERSION}` exists and points exactly to `HEAD`.
+3. **Version Consistency:** Asserts that `engine/Cargo.toml`, `vscode-extension/package.json`, and requested release version match.
+4. **Secret Isolation:** Compilation (`cargo build`) and extension bundling (`npm run compile`) execute in an isolated environment where `CYRAVELL_RELEASE_SIGNING_KEY` is explicitly unset.
+5. **Private Key Presence:** In official mode, fails closed if `CYRAVELL_RELEASE_SIGNING_KEY` is missing from the environment.
+6. **Development Flag:** Developers can pass `--dev` (or `--allow-dirty`) for testing, which signs with `cyravell-dev-test-2026` and marks `signing_mode: "development"`.
 
 ---
 
-## 7. Automated Security Verification (CI/CD)
+## 7. Independent Standalone Verification Path
 
-CI workflows (`.github/workflows/ci.yml` and `.github/workflows/release.yml`) automate verification:
+### Eliminating Pre-Installation Binary Execution
+Prior release processes fell back to executing the downloaded binary (`cyravell-engine verify-release`) to verify itself if no engine was pre-installed. This created a bootstrap vulnerability: executing untrusted binaries before verifying them.
 
-### Pinned Actions Policy
-To prevent supply-chain compromise of CI workflows, all third-party GitHub Actions are pinned to immutable 40-character commit SHAs:
-- `actions/checkout@b4ffde65f46336ab88eb53be808477a3936bae11` (# v4.1.1)
-- `actions/setup-node@60edb5dd545a775178f52524783378180af0d1f8` (# v4.0.2)
-- `dtolnay/rust-toolchain@7b7640457d930a38d9bda16020914e66cf17f65a` (# master 2024-03)
-- `actions/upload-artifact@5d5d22a31266ced268874388b861e4b58bb5c2f3` (# v4.3.1)
+Phase 3.1 eliminates this chicken-and-egg vulnerability by introducing **`scripts/standalone_verify.py`**:
+- Implements manifest parsing, canonical serialization, and Ed25519 signature checking using standard Python 3 + `cryptography`.
+- **Zero Binary Execution:** Evaluates SHA-256 digests and file metadata without executing *any* downloaded executable.
+- Usable by any developer on a clean machine before installing Cyravell.
+- `scripts/verify_release.sh` executes `standalone_verify.py` as Step 1 before any engine cross-check.
 
-### CI Verification Order
-1. Dependency and supply-chain audit (`scripts/audit_dependencies.sh`).
-2. Rust code formatting check (`cargo fmt --check`).
-3. Rust compilation check with locked dependencies (`cargo check --locked --workspace`).
-4. Static linting with zero warnings (`cargo clippy --workspace -- -D warnings`).
-5. Complete unit and subsystem tests (`cargo test --workspace`).
-6. Extension TypeScript compilation and unit tests (`npm run compile && npm test`).
-7. End-to-end vertical slice, daemon IPC, controlled gate, package interception, and adversarial tests (`scripts/test.sh`).
+### Filesystem & Anti-Tamper Hardening
+Both the standalone verifier and the Rust engine reject:
+- **Symbolic Links:** Any artifact that is a symlink triggers immediate `SecurityCheckFailed`.
+- **Non-Regular Files:** FIFOs, sockets, device nodes, and directories listed as artifacts trigger `SecurityCheckFailed`.
+- **Path Traversal:** Filenames containing `..`, leading `/`, backslashes, or null bytes trigger `SecurityCheckFailed`.
+- **Unlisted Executables:** Extraneous `.sh`, `.bin`, `.py`, `.exe`, or `.so` files in the release directory trigger `SecurityCheckFailed`.
+- **Duplicate JSON Keys:** Malformed JSON manifests with duplicate keys are rejected.
 
 ---
 
-## 8. User Verification & Installation Workflow
+## 8. User Verification & Installation Instructions
 
-Users must verify release integrity before executing binaries or installing the extension.
-
-### Verification Command
+### Official Release Verification
 ```bash
-# Verify release directory against release_manifest.json and trusted public keys
-./scripts/verify_release.sh /path/to/cyravell-release-v0.1.0 0.1.0
-```
-Or directly via the engine CLI:
-```bash
+# 1. Standalone Verification (Zero binary execution, recommended for clean systems):
+python3 scripts/standalone_verify.py \
+  --manifest path/to/release/release_manifest.json \
+  --artifacts-dir path/to/release
+
+# 2. Or using the verify_release wrapper:
+./scripts/verify_release.sh --release-dir path/to/release --expected-version 0.1.0
+
+# 3. Or directly via a trusted local engine (if already installed):
 cyravell-engine verify-release \
-  --manifest /path/to/cyravell-release-v0.1.0/release_manifest.json \
-  --artifacts-dir /path/to/cyravell-release-v0.1.0 \
+  --manifest path/to/release/release_manifest.json \
+  --artifacts-dir path/to/release \
   --expected-version 0.1.0
 ```
 
-### Verification Checks Performed
-1. **Manifest Integrity:** Verifies JSON syntax, schema compliance, and absence of duplicate keys.
-2. **Cryptographic Signature:** Computes canonical signing bytes and verifies the Ed25519 signature against `rules/release_signing_keys.json`.
-3. **Artifact Digests:** Measures byte length and SHA-256 digest of every listed artifact (`cyravell-engine`, `cyravell-test-harness`, `cyravell-*.vsix`, `cyravell-rules-bundle.tar.gz`, `cyravell-sbom.spdx.json`).
-4. **Path Traversal Defense:** Confirms no artifact name contains `..`, leading `/`, backslashes, or null bytes.
-5. **Completeness & Foreign Files:** Identifies any missing required components or unlisted extraneous binaries.
+### Development Build Verification
+When verifying builds signed with developer/test keys:
+```bash
+python3 scripts/standalone_verify.py \
+  --manifest path/to/release/release_manifest.json \
+  --artifacts-dir path/to/release \
+  --allow-dev-keys
+```
 
-### What to Do When Verification Fails
-If verification returns non-zero (`TamperedArtifact`, `InvalidSignature`, `MissingArtifact`, `SecurityCheckFailed`):
-1. **STOP IMMEDIATELY:** Do not execute the engine binary or install the `.vsix`.
-2. Inspect the failure details:
-   - If `TamperedArtifact`: The binary or archive does not match the publisher's signed digest.
-   - If `InvalidSignature`: The manifest has been modified or signed by an unrecognized key.
-   - If `MissingArtifact`: One or more deliverables were dropped during transport.
-3. Re-download from official distribution channels or build from verified source tags.
+### Installation of Verified Artifacts
+Only proceed after verification outputs `✓ ALL VERIFICATION CHECKS PASSED`:
+```bash
+# 1. Engine Binary
+sudo install -m 755 path/to/release/cyravell-engine-x86_64-unknown-linux-gnu /usr/local/bin/cyravell-engine
+
+# 2. Rules Bundle
+sudo tar -xzf path/to/release/cyravell-rules-bundle.tar.gz -C /usr/local/share/cyravell/
+
+# 3. VS Code Extension
+code --install-extension path/to/release/cyravell-0.1.0.vsix
+```
+
+### Detecting & Responding to Verification Failures
+
+| Status | Cause | Mandatory Response |
+| :--- | :--- | :--- |
+| `TamperedArtifact` | File content or byte size does not match signed digest | **DO NOT INSTALL.** Delete directory; re-download from official channels. |
+| `InvalidSignature` | Manifest altered after signing, corrupted signature, or expired key | **DO NOT INSTALL.** Reject package; verify publisher trust material. |
+| `UntrustedKey` | Manifest was signed by a development/test key (`is_official: false`) | **DO NOT INSTALL IN PRODUCTION.** Official releases require official publisher key. |
+| `MissingArtifact` | Required component (binary, SBOM, vsix) missing from release | Re-download release archive; package is incomplete. |
+| `SecurityCheckFailed` | Symbolic link, path traversal, or unlisted executable detected | **HIGH SECURITY ALERT.** Potential active attack; inspect provenance immediately. |
 
 ---
 
-## 9. Threat Analysis & Residual Risks
+## 9. CI/CD Release Workflow Hardening (`.github/workflows/release.yml`)
 
-### Conceptual Distinctions
-- **Source Review:** Confirms that source code behavior matches developer intentions.
-- **Artifact Integrity:** Confirms that a binary has not been modified after compilation.
-- **Publisher Authenticity:** Confirms that the release manifest was signed by an authorized key holder.
-- **Build Provenance:** Links an artifact to the build environment and source commit that produced it.
-
-### Residual Threats & Attack Vectors
-| Threat Scenario | Impact | Mitigation in Place |
-| :--- | :--- | :--- |
-| **Compromised Build Environment (Runner)** | Malicious code injected into binary prior to signing | Reproducible build configuration allows independent verification; pinned action SHAs prevent runner script modification. |
-| **Compromised Release Signing Key** | Attacker publishes signed malicious update | Keys stored outside repository; cryptographic expiration timestamps; separate advisory key prevents intelligence hijacking. |
-| **Upstream Registry Dependency Takeover** | Malicious code in third-party crate or npm package | Locked dependency files; zero wildcards; offline-first runtime model; pre-installation gate blocks malicious packages. |
-| **Compromised Local Root User** | Attacker with root replaces `/usr/local/bin/cyravell-engine` | Operating-system privilege boundaries; kernel protections; Cyravell does not claim protection against local root attackers. |
-
-> [!IMPORTANT]
-> A passing CI workflow and valid signature do **NOT** guarantee software is completely free of vulnerabilities. They verify that the artifact faithfully represents reviewed source code from authorized maintainers.
+1. **Least-Privilege Permissions:** Default workflow permissions scoped to `contents: read`. No broad write permissions.
+2. **Tag-to-Commit Binding:** Validates that the git tag matches `v${VERSION}` and points directly to `GITHUB_SHA`.
+3. **Commit Continuity:** Confirms `GITHUB_SHA` is an ancestor of the `main` or `master` branch.
+4. **Isolated Signing Secret:** Secret `CYRAVELL_RELEASE_SIGNING_KEY` is isolated to the signing step and never exposed to build or test jobs.
+5. **Pre-Publish Verification:** Executes `./scripts/verify_release.sh` against the built artifacts before any artifact upload.

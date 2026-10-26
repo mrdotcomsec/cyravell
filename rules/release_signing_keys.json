@@ -4,11 +4,22 @@
     {
       "key_id": "cyravell-release-official-2026",
       "publisher": "Cyravell Core Release Authority",
-      "public_key_hex": "c715e8fb37fa48695899660b5668f0070c481e04879060177efb256b1d64c02e",
+      "public_key_hex": "9e9f6bf692b6f360a13419327f445a4378357219dea595f6c468916d60ef8a78",
       "algorithm": "ed25519",
       "created_at": "2026-01-01T00:00:00Z",
       "expires_at": null,
-      "is_active": true
+      "is_active": true,
+      "is_official": true
+    },
+    {
+      "key_id": "cyravell-dev-test-2026",
+      "publisher": "Cyravell Development & Test Authority",
+      "public_key_hex": "46e59f5579ecb6852665043f138d994df7688022c8e4c55aba4ad891a8d61c75",
+      "algorithm": "ed25519",
+      "created_at": "2026-01-01T00:00:00Z",
+      "expires_at": null,
+      "is_active": true,
+      "is_official": false
     }
   ]
 }

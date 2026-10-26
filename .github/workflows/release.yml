@@ -11,18 +11,53 @@ on:
         required: true
         default: '0.1.0'
 
+# Default to least privilege across the entire workflow
 permissions:
-  contents: write
-  id-token: write
+  contents: read
 
 jobs:
   pre-release-verification:
     name: Mandatory Pre-Release Verification
     runs-on: ubuntu-latest
+    permissions:
+      contents: read
     steps:
       - name: Checkout Source Code
         # Pinned to v4.1.1 commit SHA
         uses: actions/checkout@b4ffde65f46336ab88eb53be808477a3936bae11
+        with:
+          fetch-depth: 0
+
+      - name: Validate Git Tag and Commit Continuity
+        run: |
+          if [ "${{ github.event_name }}" = "workflow_dispatch" ]; then
+            VERSION="${{ github.event.inputs.release_version }}"
+            TAG_NAME="v${VERSION}"
+          else
+            TAG_NAME="${{ github.ref_name }}"
+            VERSION="${TAG_NAME#v}"
+          fi
+
+          echo "Validating tag ${TAG_NAME} and commit ${GITHUB_SHA}..."
+
+          # Ensure tag points to the current commit
+          TAG_SHA=$(git rev-list -n 1 "${TAG_NAME}" 2>/dev/null || true)
+          if [ -z "${TAG_SHA}" ]; then
+            echo "Error: Tag '${TAG_NAME}' not found in repository!"
+            exit 1
+          fi
+          if [ "${TAG_SHA}" != "${GITHUB_SHA}" ]; then
+            echo "Error: Tag '${TAG_NAME}' (${TAG_SHA}) does not match HEAD commit (${GITHUB_SHA})!"
+            exit 1
+          fi
+
+          # Ensure commit is on or ancestor of main or master
+          if git merge-base --is-ancestor "${GITHUB_SHA}" origin/master 2>/dev/null || \
+             git merge-base --is-ancestor "${GITHUB_SHA}" origin/main 2>/dev/null; then
+            echo "✓ Commit continuity verified: ${GITHUB_SHA} is an ancestor of main/master branch"
+          else
+            echo "Warning: Commit ${GITHUB_SHA} not yet merged to main/master"
+          fi
 
       - name: Setup Rust Toolchain
         # Pinned to master commit SHA (2024-03)
@@ -61,10 +96,23 @@ jobs:
     name: Reproducible Build, Packaging & Signing
     runs-on: ubuntu-latest
     needs: pre-release-verification
+    permissions:
+      contents: read
     steps:
       - name: Checkout Source Code
         # Pinned to v4.1.1 commit SHA
         uses: actions/checkout@b4ffde65f46336ab88eb53be808477a3936bae11
+        with:
+          fetch-depth: 0
+
+      - name: Validate Release Signing Secret Presence
+        run: |
+          if [ -z "${{ secrets.CYRAVELL_RELEASE_SIGNING_KEY }}" ]; then
+            echo "✗ CRITICAL ERROR: Secret CYRAVELL_RELEASE_SIGNING_KEY is not configured!"
+            echo "  Official releases require a configured production private key. Failing closed."
+            exit 1
+          fi
+          echo "✓ Release signing secret is configured."
 
       - name: Setup Rust Toolchain
         # Pinned to master commit SHA (2024-03)
@@ -78,6 +126,14 @@ jobs:
         with:
           node-version: 18
 
+      - name: Setup Python Environment for Standalone Verification
+        uses: actions/setup-python@0a5c61591373683505ea898e09a3ea4f39ef2b9c
+        with:
+          python-version: '3.11'
+
+      - name: Install Python Cryptography for Verification
+        run: pip install cryptography
+
       - name: Determine Version
         id: get_version
         run: |
@@ -88,17 +144,21 @@ jobs:
             echo "version=${TAG_REF#v}" >> $GITHUB_OUTPUT
           fi
 
-      - name: Package Release Deliverables
+      - name: Package Release Deliverables (Official Mode)
         env:
           CYRAVELL_RELEASE_SIGNING_KEY: ${{ secrets.CYRAVELL_RELEASE_SIGNING_KEY }}
         run: |
           VERSION="${{ steps.get_version.outputs.version }}"
-          ./scripts/package_release.sh "${VERSION}"
+          ./scripts/package_release.sh --official "${VERSION}"
 
-      - name: Verify Packaged Deliverables
+      - name: Independent Pre-Installation Verification
         run: |
           VERSION="${{ steps.get_version.outputs.version }}"
-          ./scripts/verify_release.sh "${GITHUB_WORKSPACE}/dist/release-v${VERSION}" "${VERSION}"
+          DIST="${GITHUB_WORKSPACE}/dist/release-v${VERSION}"
+          ./scripts/verify_release.sh \
+            --dir "${DIST}" \
+            --expected-version "${VERSION}" \
+            --expected-commit "${GITHUB_SHA}"
 
       - name: Upload Release Artifacts
         # Pinned to v4.3.1 commit SHA

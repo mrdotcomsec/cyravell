@@ -83,6 +83,10 @@ enum Commands {
         #[arg(long)]
         expected_commit: Option<String>,
 
+        /// Allow non-official development/test keys (by default only official release keys are accepted)
+        #[arg(long, default_value_t = false)]
+        allow_dev_keys: bool,
+
         #[arg(long)]
         json: bool,
     },
@@ -106,6 +110,9 @@ enum Commands {
         #[arg(long, default_value = "cyravell-sbom.spdx.json")]
         sbom: String,
 
+        #[arg(long, default_value = "official")]
+        signing_mode: String,
+
         #[arg(short, long)]
         output: PathBuf,
     },
@@ -120,6 +127,9 @@ enum Commands {
         /// 32-byte Ed25519 secret key in hex format (or set CYRAVELL_RELEASE_SIGNING_KEY)
         #[arg(short, long)]
         secret_key_hex: Option<String>,
+
+        #[arg(long, default_value = "official")]
+        signing_mode: String,
 
         #[arg(short, long)]
         output: Option<PathBuf>,
@@ -328,6 +338,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             keys_file,
             expected_version,
             expected_commit,
+            allow_dev_keys,
             json,
         } => {
             let keystore = match keys_file {
@@ -345,12 +356,14 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 None => ReleaseKeyStore::load_default(),
             };
 
+            let require_official = !allow_dev_keys;
             let report = verify_release_package(
                 &manifest,
                 &artifacts_dir,
                 &keystore,
                 expected_version.as_deref(),
                 expected_commit.as_deref(),
+                require_official,
             );
 
             if json {
@@ -419,6 +432,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             tag,
             target_platform,
             sbom,
+            signing_mode,
             output,
         } => {
             let manifest = match generate_release_manifest(
@@ -428,6 +442,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 tag.as_deref(),
                 &target_platform,
                 &sbom,
+                Some(&signing_mode),
             ) {
                 Ok(m) => m,
                 Err(e) => {
@@ -439,9 +454,10 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             let json_str = serde_json::to_string_pretty(&manifest)?;
             std::fs::write(&output, json_str)?;
             println!(
-                "Successfully generated release manifest: {} ({} artifacts enumerated)",
+                "Successfully generated release manifest: {} ({} artifacts enumerated, mode: '{}')",
                 output.display(),
-                manifest.artifacts.len()
+                manifest.artifacts.len(),
+                signing_mode
             );
         }
 
@@ -449,6 +465,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             manifest,
             key_id,
             secret_key_hex,
+            signing_mode,
             output,
         } => {
             let key_hex = match secret_key_hex {
@@ -488,9 +505,28 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
             let signing_key = SigningKey::from_bytes(&key_arr);
 
+            // Verify key identity against keystore to prevent key ID spoofing
+            let keystore = ReleaseKeyStore::load_default();
+            if let Some(expected_key) = keystore.get_key(&key_id) {
+                let computed_pub = hex::encode(signing_key.verifying_key().to_bytes());
+                if computed_pub.to_lowercase() != expected_key.public_key_hex.to_lowercase() {
+                    eprintln!(
+                        "Error: The provided signing key does not correspond to key ID '{}' (public key mismatch)",
+                        key_id
+                    );
+                    std::process::exit(1);
+                }
+            } else {
+                eprintln!(
+                    "Warning: Key ID '{}' is not present in local trusted keystore",
+                    key_id
+                );
+            }
+
             let content = std::fs::read_to_string(&manifest)?;
             let mut rel_manifest: CyravellReleaseManifest = serde_json::from_str(&content)?;
 
+            rel_manifest.signing_mode = Some(signing_mode);
             rel_manifest.sign(&signing_key, &key_id);
 
             let out_path = output.unwrap_or(manifest);

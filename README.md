@@ -16,13 +16,14 @@ Cyravell intercepts and assesses terminal commands before execution, inspects pa
 - **Dependency Drift & Baseline Reconciliation:** Local project baselining and continuous monitoring for unexpected post-installation dependency drift.
 - **Cryptographically Authenticated Advisory Updates:** Offline-first, signed Ed25519 advisory bundles with two-phase tokenized anti-rollback protection.
 - **Privilege Boundaries & Local IPC Access Control:** `SO_PEERCRED` kernel-level client authentication, role-based operation tiers (`ReadOnly`, `Standard`, `Privileged`, `Rollback`), and directory hardening.
-- **Release Integrity & Software Supply-Chain Security (Phase 3.0):**
+- **Release Integrity & Independent Verification (Phase 3.0 & Phase 3.1):**
   - Canonical signed release manifest (`release_manifest.json`) cataloging deliverables with exact SHA-256 digests.
-  - Dedicated `ReleaseKeyStore` with cryptographic domain separation from package intelligence keys.
+  - Dedicated `ReleaseKeyStore` with cryptographic domain separation and official vs dev key tier enforcement.
+  - Independent standalone pre-installation verifier (`scripts/standalone_verify.py`) requiring **zero downloaded binary execution**.
+  - Filesystem defenses rejecting symlinks, non-regular files, directory traversal, and unlisted executables.
   - Machine-readable SPDX 2.3 JSON Software Bill of Materials (SBOM) for Rust and npm ecosystems.
   - Reproducible builds with path remapping and normalized packaging timestamps.
-  - Pinned CI/CD actions to immutable 40-character commit SHAs.
-  - Pre-installation user verification tool (`scripts/verify_release.sh`).
+  - Pinned CI/CD actions to immutable 40-character commit SHAs with secret-isolated signing steps.
 
 ---
 
@@ -109,3 +110,4 @@ cargo test --workspace
 ## License
 
 Copyright 2026 Cyravell Contributors. Licensed under the Apache License, Version 2.0.
+

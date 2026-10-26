@@ -17,6 +17,7 @@ fn generate_test_key(
     key_id: &str,
     active: bool,
     expired: bool,
+    is_official: bool,
 ) -> (SigningKey, ReleaseKey) {
     let seed = [seed_byte; 32];
     let signing_key = SigningKey::from_bytes(&seed);
@@ -37,6 +38,7 @@ fn generate_test_key(
         created_at: Utc::now().to_rfc3339(),
         expires_at,
         is_active: active,
+        is_official,
     };
 
     (signing_key, rel_key)
@@ -108,11 +110,13 @@ fn test_01_valid_signed_release_manifest_verification() {
             sha256: sbom_art.sha256,
             format: "SPDX-2.3".to_string(),
         },
+        signing_mode: Some("official".to_string()),
         signing_key_id: None,
         signature: None,
     };
 
-    let (signing_key, rel_key) = generate_test_key(1, "cyravell-release-test-key", true, false);
+    let (signing_key, rel_key) =
+        generate_test_key(1, "cyravell-release-test-key", true, false, true);
     manifest.sign(&signing_key, &rel_key.key_id);
 
     let mut keystore = ReleaseKeyStore::new();
@@ -131,6 +135,7 @@ fn test_01_valid_signed_release_manifest_verification() {
         &keystore,
         Some("0.1.0"),
         Some("0123456789abcdef0123456789abcdef01234567"),
+        true,
     );
 
     assert_eq!(report.status, ReleaseStatus::Verified);
@@ -141,6 +146,8 @@ fn test_01_valid_signed_release_manifest_verification() {
         report.signing_key_id.as_deref(),
         Some("cyravell-release-test-key")
     );
+    assert!(report.is_official);
+    assert_eq!(report.signing_mode.as_deref(), Some("official"));
 }
 
 #[test]
@@ -180,11 +187,12 @@ fn test_02_tampered_artifact_content_detected() {
             sha256: sbom_art.sha256,
             format: "SPDX-2.3".to_string(),
         },
+        signing_mode: Some("official".to_string()),
         signing_key_id: None,
         signature: None,
     };
 
-    let (signing_key, rel_key) = generate_test_key(2, "test-key-tamper", true, false);
+    let (signing_key, rel_key) = generate_test_key(2, "test-key-tamper", true, false, true);
     manifest.sign(&signing_key, &rel_key.key_id);
 
     let mut keystore = ReleaseKeyStore::new();
@@ -204,7 +212,7 @@ fn test_02_tampered_artifact_content_detected() {
     )
     .unwrap();
 
-    let report = verify_release_package(&manifest_path, &art_dir, &keystore, None, None);
+    let report = verify_release_package(&manifest_path, &art_dir, &keystore, None, None, true);
     assert_eq!(report.status, ReleaseStatus::TamperedArtifact);
     assert_eq!(
         report.mismatched_artifacts,
@@ -251,11 +259,12 @@ fn test_03_missing_artifact_detected() {
             sha256: sbom_art.sha256,
             format: "SPDX-2.3".to_string(),
         },
+        signing_mode: Some("official".to_string()),
         signing_key_id: None,
         signature: None,
     };
 
-    let (signing_key, rel_key) = generate_test_key(3, "test-key-missing", true, false);
+    let (signing_key, rel_key) = generate_test_key(3, "test-key-missing", true, false, true);
     manifest.sign(&signing_key, &rel_key.key_id);
 
     let mut keystore = ReleaseKeyStore::new();
@@ -271,7 +280,7 @@ fn test_03_missing_artifact_detected() {
     // Adversarially delete cyravell-0.1.0.vsix
     std::fs::remove_file(art_dir.join("cyravell-0.1.0.vsix")).unwrap();
 
-    let report = verify_release_package(&manifest_path, &art_dir, &keystore, None, None);
+    let report = verify_release_package(&manifest_path, &art_dir, &keystore, None, None, true);
     assert_eq!(report.status, ReleaseStatus::MissingArtifact);
     assert_eq!(
         report.missing_artifacts,
@@ -316,11 +325,12 @@ fn test_04_tampered_manifest_payload_fails_signature() {
             sha256: sbom_art.sha256,
             format: "SPDX-2.3".to_string(),
         },
+        signing_mode: Some("official".to_string()),
         signing_key_id: None,
         signature: None,
     };
 
-    let (signing_key, rel_key) = generate_test_key(4, "test-key-sig", true, false);
+    let (signing_key, rel_key) = generate_test_key(4, "test-key-sig", true, false, true);
     manifest.sign(&signing_key, &rel_key.key_id);
 
     // Tamper with manifest fields (e.g. source_commit changed) without re-signing
@@ -336,7 +346,7 @@ fn test_04_tampered_manifest_payload_fails_signature() {
     )
     .unwrap();
 
-    let report = verify_release_package(&manifest_path, &art_dir, &keystore, None, None);
+    let report = verify_release_package(&manifest_path, &art_dir, &keystore, None, None, true);
     assert_eq!(report.status, ReleaseStatus::InvalidSignature);
 }
 
@@ -374,11 +384,12 @@ fn test_05_unrecognized_or_untrusted_signing_key_rejected() {
             sha256: sbom_art.sha256,
             format: "SPDX-2.3".to_string(),
         },
+        signing_mode: Some("official".to_string()),
         signing_key_id: None,
         signature: None,
     };
 
-    let (untrusted_key, _) = generate_test_key(5, "untrusted-attacker-key", true, false);
+    let (untrusted_key, _) = generate_test_key(5, "untrusted-attacker-key", true, false, true);
     manifest.sign(&untrusted_key, "untrusted-attacker-key");
 
     let keystore = ReleaseKeyStore::new(); // empty keystore
@@ -390,7 +401,7 @@ fn test_05_unrecognized_or_untrusted_signing_key_rejected() {
     )
     .unwrap();
 
-    let report = verify_release_package(&manifest_path, &art_dir, &keystore, None, None);
+    let report = verify_release_package(&manifest_path, &art_dir, &keystore, None, None, true);
     assert_eq!(report.status, ReleaseStatus::InvalidSignature);
 }
 
@@ -428,12 +439,14 @@ fn test_06_revoked_or_expired_release_key_rejected() {
             sha256: sbom_art.sha256,
             format: "SPDX-2.3".to_string(),
         },
+        signing_mode: Some("official".to_string()),
         signing_key_id: None,
         signature: None,
     };
 
     // Test Revoked Key
-    let (revoked_signing, revoked_rel_key) = generate_test_key(6, "revoked-key", false, false);
+    let (revoked_signing, revoked_rel_key) =
+        generate_test_key(6, "revoked-key", false, false, true);
     manifest.sign(&revoked_signing, &revoked_rel_key.key_id);
 
     let mut keystore = ReleaseKeyStore::new();
@@ -446,11 +459,11 @@ fn test_06_revoked_or_expired_release_key_rejected() {
     )
     .unwrap();
 
-    let report = verify_release_package(&manifest_path, &art_dir, &keystore, None, None);
+    let report = verify_release_package(&manifest_path, &art_dir, &keystore, None, None, true);
     assert_eq!(report.status, ReleaseStatus::InvalidSignature);
 
     // Test Expired Key
-    let (expired_signing, expired_rel_key) = generate_test_key(7, "expired-key", true, true);
+    let (expired_signing, expired_rel_key) = generate_test_key(7, "expired-key", true, true, true);
     manifest.sign(&expired_signing, &expired_rel_key.key_id);
 
     let mut keystore2 = ReleaseKeyStore::new();
@@ -461,7 +474,7 @@ fn test_06_revoked_or_expired_release_key_rejected() {
         serde_json::to_string_pretty(&manifest).unwrap(),
     )
     .unwrap();
-    let report2 = verify_release_package(&manifest_path, &art_dir, &keystore2, None, None);
+    let report2 = verify_release_package(&manifest_path, &art_dir, &keystore2, None, None, true);
     assert_eq!(report2.status, ReleaseStatus::InvalidSignature);
 }
 
@@ -509,11 +522,12 @@ fn test_07_path_traversal_in_artifact_filename_rejected() {
             sha256: sbom_art.sha256,
             format: "SPDX-2.3".to_string(),
         },
+        signing_mode: Some("official".to_string()),
         signing_key_id: None,
         signature: None,
     };
 
-    let (signing_key, rel_key) = generate_test_key(8, "test-key-path", true, false);
+    let (signing_key, rel_key) = generate_test_key(8, "test-key-path", true, false, true);
     manifest.sign(&signing_key, &rel_key.key_id);
 
     let mut keystore = ReleaseKeyStore::new();
@@ -526,7 +540,7 @@ fn test_07_path_traversal_in_artifact_filename_rejected() {
     )
     .unwrap();
 
-    let report = verify_release_package(&manifest_path, &art_dir, &keystore, None, None);
+    let report = verify_release_package(&manifest_path, &art_dir, &keystore, None, None, true);
     assert_eq!(report.status, ReleaseStatus::SecurityCheckFailed);
     assert!(report.details.contains("Path traversal"));
 }
@@ -564,7 +578,7 @@ fn test_08_duplicate_keys_in_manifest_rejected() {
     std::fs::write(&manifest_path, malformed_json).unwrap();
 
     let keystore = ReleaseKeyStore::new();
-    let report = verify_release_package(&manifest_path, &art_dir, &keystore, None, None);
+    let report = verify_release_package(&manifest_path, &art_dir, &keystore, None, None, true);
     assert_eq!(report.status, ReleaseStatus::MalformedManifest);
     assert!(report.details.contains("Duplicate key"));
 }
@@ -594,6 +608,7 @@ fn test_09_generate_release_manifest_accurately_catalogs_artifacts() {
         Some("v0.1.0"),
         "x86_64-unknown-linux-gnu",
         "cyravell-sbom.spdx.json",
+        Some("official"),
     )
     .expect("generate release manifest");
 
@@ -605,6 +620,7 @@ fn test_09_generate_release_manifest_accurately_catalogs_artifacts() {
     assert_eq!(manifest.source_tag.as_deref(), Some("v0.1.0"));
     assert_eq!(manifest.artifacts.len(), 3);
     assert_eq!(manifest.sbom.filename, "cyravell-sbom.spdx.json");
+    assert_eq!(manifest.signing_mode.as_deref(), Some("official"));
 
     let bin_entry = manifest
         .artifacts
@@ -656,11 +672,12 @@ fn test_10_version_and_commit_expectation_mismatch() {
             sha256: sbom_art.sha256,
             format: "SPDX-2.3".to_string(),
         },
+        signing_mode: Some("official".to_string()),
         signing_key_id: None,
         signature: None,
     };
 
-    let (signing_key, rel_key) = generate_test_key(9, "test-key-ver", true, false);
+    let (signing_key, rel_key) = generate_test_key(9, "test-key-ver", true, false, true);
     manifest.sign(&signing_key, &rel_key.key_id);
 
     let mut keystore = ReleaseKeyStore::new();
@@ -680,6 +697,7 @@ fn test_10_version_and_commit_expectation_mismatch() {
         &keystore,
         Some("0.2.0"),
         Some("commit-actual-111"),
+        true,
     );
     assert_ne!(report.status, ReleaseStatus::Verified);
     assert!(report
@@ -694,10 +712,255 @@ fn test_10_version_and_commit_expectation_mismatch() {
         &keystore,
         Some("0.1.0"),
         Some("commit-expected-222"),
+        true,
     );
     assert_ne!(report2.status, ReleaseStatus::Verified);
     assert!(report2
         .errors
         .iter()
         .any(|e| e.contains("Source commit mismatch")));
+}
+
+#[test]
+fn test_11_symlink_artifact_rejected() {
+    let temp = tempdir().expect("tempdir");
+    let art_dir = temp.path().join("artifacts");
+    std::fs::create_dir_all(&art_dir).expect("create art_dir");
+
+    // Create target file outside or inside, and create symlink inside art_dir
+    let outside_file = temp.path().join("secret_target.txt");
+    std::fs::write(&outside_file, b"secret data").unwrap();
+
+    let symlink_path = art_dir.join("cyravell-engine");
+    #[cfg(unix)]
+    std::os::unix::fs::symlink(&outside_file, &symlink_path).unwrap();
+
+    let sbom_art = create_sample_artifact(&art_dir, "cyravell-sbom.spdx.json", b"sbom");
+    let mut artifacts = BTreeMap::new();
+    artifacts.insert(
+        "cyravell-engine".to_string(),
+        ReleaseArtifact {
+            filename: "cyravell-engine".to_string(),
+            size_bytes: 11,
+            sha256: crate::release::compute_sha256(&outside_file).unwrap(),
+            artifact_type: "binary".to_string(),
+            target_platform: Some("x86_64-unknown-linux-gnu".to_string()),
+        },
+    );
+    artifacts.insert(sbom_art.filename.clone(), sbom_art.clone());
+
+    let mut manifest = CyravellReleaseManifest {
+        schema_version: "1.0.0".to_string(),
+        product_name: "cyravell".to_string(),
+        release_version: "0.1.0".to_string(),
+        source_commit: "0123456789abcdef0123456789abcdef01234567".to_string(),
+        source_tag: Some("v0.1.0".to_string()),
+        build_timestamp: Utc::now().to_rfc3339(),
+        engine_version: "0.1.0".to_string(),
+        extension_version: "0.1.0".to_string(),
+        target_platforms: vec!["x86_64-unknown-linux-gnu".to_string()],
+        artifacts,
+        required_runtime_components: vec![],
+        build_metadata: BuildMetadata {
+            rustc_version: "rustc 1.99.1".to_string(),
+            cargo_version: "cargo 1.99.1".to_string(),
+            node_version: None,
+            build_profile: "release".to_string(),
+            source_date_epoch: None,
+        },
+        sbom: SbomReference {
+            filename: sbom_art.filename,
+            sha256: sbom_art.sha256,
+            format: "SPDX-2.3".to_string(),
+        },
+        signing_mode: Some("official".to_string()),
+        signing_key_id: None,
+        signature: None,
+    };
+
+    let (signing_key, rel_key) = generate_test_key(11, "test-key-symlink", true, false, true);
+    manifest.sign(&signing_key, &rel_key.key_id);
+
+    let mut keystore = ReleaseKeyStore::new();
+    keystore.add_key(rel_key);
+
+    let manifest_path = art_dir.join("release_manifest.json");
+    std::fs::write(
+        &manifest_path,
+        serde_json::to_string_pretty(&manifest).unwrap(),
+    )
+    .unwrap();
+
+    let report = verify_release_package(&manifest_path, &art_dir, &keystore, None, None, true);
+    assert_eq!(report.status, ReleaseStatus::SecurityCheckFailed);
+    assert!(
+        report.details.contains("symbolic link")
+            || report.errors.iter().any(|e| e.contains("symbolic link"))
+    );
+}
+
+#[test]
+fn test_12_non_official_dev_key_rejected_when_official_required() {
+    let temp = tempdir().expect("tempdir");
+    let art_dir = temp.path().join("artifacts");
+    std::fs::create_dir_all(&art_dir).expect("create art_dir");
+
+    let sbom_art = create_sample_artifact(&art_dir, "cyravell-sbom.spdx.json", b"sbom");
+    let mut artifacts = BTreeMap::new();
+    artifacts.insert(sbom_art.filename.clone(), sbom_art.clone());
+
+    let mut manifest = CyravellReleaseManifest {
+        schema_version: "1.0.0".to_string(),
+        product_name: "cyravell".to_string(),
+        release_version: "0.1.0".to_string(),
+        source_commit: "0123456789abcdef0123456789abcdef01234567".to_string(),
+        source_tag: Some("v0.1.0".to_string()),
+        build_timestamp: Utc::now().to_rfc3339(),
+        engine_version: "0.1.0".to_string(),
+        extension_version: "0.1.0".to_string(),
+        target_platforms: vec!["x86_64-unknown-linux-gnu".to_string()],
+        artifacts,
+        required_runtime_components: vec![],
+        build_metadata: BuildMetadata {
+            rustc_version: "rustc 1.99.1".to_string(),
+            cargo_version: "cargo 1.99.1".to_string(),
+            node_version: None,
+            build_profile: "release".to_string(),
+            source_date_epoch: None,
+        },
+        sbom: SbomReference {
+            filename: sbom_art.filename,
+            sha256: sbom_art.sha256,
+            format: "SPDX-2.3".to_string(),
+        },
+        signing_mode: Some("development".to_string()),
+        signing_key_id: None,
+        signature: None,
+    };
+
+    // Generate development key (is_official = false)
+    let (dev_signing_key, dev_rel_key) =
+        generate_test_key(12, "cyravell-dev-key", true, false, false);
+    manifest.sign(&dev_signing_key, &dev_rel_key.key_id);
+
+    let mut keystore = ReleaseKeyStore::new();
+    keystore.add_key(dev_rel_key);
+
+    let manifest_path = art_dir.join("release_manifest.json");
+    std::fs::write(
+        &manifest_path,
+        serde_json::to_string_pretty(&manifest).unwrap(),
+    )
+    .unwrap();
+
+    // 1. With require_official = true -> MUST FAIL with UntrustedKey
+    let report_strict =
+        verify_release_package(&manifest_path, &art_dir, &keystore, None, None, true);
+    assert_eq!(report_strict.status, ReleaseStatus::UntrustedKey);
+    assert!(report_strict
+        .details
+        .contains("official production release signing key is required"));
+
+    // 2. With require_official = false -> MUST PASS
+    let report_dev = verify_release_package(&manifest_path, &art_dir, &keystore, None, None, false);
+    assert_eq!(report_dev.status, ReleaseStatus::Verified);
+    assert!(!report_dev.is_official);
+    assert_eq!(report_dev.signing_mode.as_deref(), Some("development"));
+}
+
+#[test]
+fn test_13_unlisted_executable_in_release_dir_rejected() {
+    let temp = tempdir().expect("tempdir");
+    let art_dir = temp.path().join("artifacts");
+    std::fs::create_dir_all(&art_dir).expect("create art_dir");
+
+    let sbom_art = create_sample_artifact(&art_dir, "cyravell-sbom.spdx.json", b"sbom");
+    let mut artifacts = BTreeMap::new();
+    artifacts.insert(sbom_art.filename.clone(), sbom_art.clone());
+
+    let mut manifest = CyravellReleaseManifest {
+        schema_version: "1.0.0".to_string(),
+        product_name: "cyravell".to_string(),
+        release_version: "0.1.0".to_string(),
+        source_commit: "0123456789abcdef0123456789abcdef01234567".to_string(),
+        source_tag: Some("v0.1.0".to_string()),
+        build_timestamp: Utc::now().to_rfc3339(),
+        engine_version: "0.1.0".to_string(),
+        extension_version: "0.1.0".to_string(),
+        target_platforms: vec!["x86_64-unknown-linux-gnu".to_string()],
+        artifacts,
+        required_runtime_components: vec![],
+        build_metadata: BuildMetadata {
+            rustc_version: "rustc 1.99.1".to_string(),
+            cargo_version: "cargo 1.99.1".to_string(),
+            node_version: None,
+            build_profile: "release".to_string(),
+            source_date_epoch: None,
+        },
+        sbom: SbomReference {
+            filename: sbom_art.filename,
+            sha256: sbom_art.sha256,
+            format: "SPDX-2.3".to_string(),
+        },
+        signing_mode: Some("official".to_string()),
+        signing_key_id: None,
+        signature: None,
+    };
+
+    let (signing_key, rel_key) = generate_test_key(13, "test-key-exec", true, false, true);
+    manifest.sign(&signing_key, &rel_key.key_id);
+
+    let mut keystore = ReleaseKeyStore::new();
+    keystore.add_key(rel_key);
+
+    let manifest_path = art_dir.join("release_manifest.json");
+    std::fs::write(
+        &manifest_path,
+        serde_json::to_string_pretty(&manifest).unwrap(),
+    )
+    .unwrap();
+
+    // Adversarially drop an unlisted executable script into the artifacts dir
+    std::fs::write(
+        art_dir.join("malicious_install.sh"),
+        b"#!/bin/bash\nrm -rf /\n",
+    )
+    .unwrap();
+
+    let report = verify_release_package(&manifest_path, &art_dir, &keystore, None, None, true);
+    assert_eq!(report.status, ReleaseStatus::SecurityCheckFailed);
+    assert!(report
+        .details
+        .to_lowercase()
+        .contains("unlisted executable file"));
+}
+
+#[test]
+fn test_14_symlink_rejected_during_manifest_generation() {
+    let temp = tempdir().expect("tempdir");
+    let art_dir = temp.path().join("artifacts");
+    std::fs::create_dir_all(&art_dir).expect("create art_dir");
+
+    let outside_file = temp.path().join("outside.bin");
+    std::fs::write(&outside_file, b"outside content").unwrap();
+
+    let symlink_path = art_dir.join("cyravell-engine");
+    #[cfg(unix)]
+    std::os::unix::fs::symlink(&outside_file, &symlink_path).unwrap();
+
+    create_sample_artifact(&art_dir, "cyravell-sbom.spdx.json", b"sbom content");
+
+    let result = generate_release_manifest(
+        &art_dir,
+        "0.1.0",
+        "0123456789abcdef0123456789abcdef01234567",
+        Some("v0.1.0"),
+        "x86_64-unknown-linux-gnu",
+        "cyravell-sbom.spdx.json",
+        Some("official"),
+    );
+
+    assert!(result.is_err());
+    let err = result.unwrap_err();
+    assert!(err.contains("symbolic link"));
 }

@@ -157,23 +157,66 @@ echo ""
 echo "[5/6] Running Phase 3.0 software supply-chain audit..."
 "${ROOT_DIR}/scripts/audit_dependencies.sh"
 
-# 6. Phase 3.0: Release Packaging, SBOM Generation & Verification
+# 6. Phase 3.1: Release Packaging, Independent Verification & Trust Chain
 echo ""
-echo "[6/6] Testing Phase 3.0 release packaging, SBOM & verification pipeline..."
-"${ROOT_DIR}/scripts/package_release.sh" "0.1.0"
-"${ROOT_DIR}/scripts/verify_release.sh" "${ROOT_DIR}/dist/release-v0.1.0" "0.1.0"
+echo "[6/6] Testing Phase 3.1 release packaging, independent verification & trust chain..."
+"${ROOT_DIR}/scripts/package_release.sh" --dev "0.1.0"
 
-# Verify adversarial release checks: tampered file must fail verification
-TEST_TAMPER_DIR="$(mktemp -d /tmp/cyravell-rel-tamper-XXXXXX)"
-cp -r "${ROOT_DIR}/dist/release-v0.1.0"/* "${TEST_TAMPER_DIR}/"
-echo "corrupted binary content" > "${TEST_TAMPER_DIR}/cyravell-engine-x86_64-unknown-linux-gnu"
-if "${ROOT_DIR}/target/release/cyravell-engine" verify-release --manifest "${TEST_TAMPER_DIR}/release_manifest.json" --artifacts-dir "${TEST_TAMPER_DIR}" 2>/dev/null; then
-  echo "Error: Verification should have failed on tampered binary!"
-  rm -rf "${TEST_TAMPER_DIR}"
+echo "  Testing independent standalone verifier (zero binary execution)..."
+python3 "${ROOT_DIR}/scripts/standalone_verify.py" \
+  --manifest "${ROOT_DIR}/dist/release-v0.1.0/release_manifest.json" \
+  --artifacts-dir "${ROOT_DIR}/dist/release-v0.1.0" \
+  --expected-version "0.1.0" \
+  --allow-dev-keys
+echo "  ✓ Standalone independent verifier passed on development release"
+
+echo "  Testing strict official verification rejects development key..."
+if python3 "${ROOT_DIR}/scripts/standalone_verify.py" \
+  --manifest "${ROOT_DIR}/dist/release-v0.1.0/release_manifest.json" \
+  --artifacts-dir "${ROOT_DIR}/dist/release-v0.1.0" 2>/dev/null; then
+  echo "Error: Strict verification should have rejected dev key!"
   exit 1
 fi
-rm -rf "${TEST_TAMPER_DIR}"
+echo "  ✓ Strict official verification correctly rejected development key"
+
+# Verify adversarial release checks:
+TEST_ADVERSARIAL_DIR="$(mktemp -d /tmp/cyravell-rel-adv-XXXXXX)"
+
+# 6a. Tampered file must fail verification
+cp -r "${ROOT_DIR}/dist/release-v0.1.0"/* "${TEST_ADVERSARIAL_DIR}/"
+echo "corrupted binary content" > "${TEST_ADVERSARIAL_DIR}/cyravell-engine-x86_64-unknown-linux-gnu"
+if "${ROOT_DIR}/target/release/cyravell-engine" verify-release --manifest "${TEST_ADVERSARIAL_DIR}/release_manifest.json" --artifacts-dir "${TEST_ADVERSARIAL_DIR}" --allow-dev-keys 2>/dev/null; then
+  echo "Error: Verification should have failed on tampered binary!"
+  rm -rf "${TEST_ADVERSARIAL_DIR}"
+  exit 1
+fi
 echo "  ✓ Tampered release artifact rejected by verify-release"
+
+# 6b. Symlink injection attack must fail verification
+rm -rf "${TEST_ADVERSARIAL_DIR}"
+TEST_ADVERSARIAL_DIR="$(mktemp -d /tmp/cyravell-rel-adv-XXXXXX)"
+cp -r "${ROOT_DIR}/dist/release-v0.1.0"/* "${TEST_ADVERSARIAL_DIR}/"
+rm -f "${TEST_ADVERSARIAL_DIR}/cyravell-engine-x86_64-unknown-linux-gnu"
+ln -s "/etc/passwd" "${TEST_ADVERSARIAL_DIR}/cyravell-engine-x86_64-unknown-linux-gnu"
+if python3 "${ROOT_DIR}/scripts/standalone_verify.py" --manifest "${TEST_ADVERSARIAL_DIR}/release_manifest.json" --artifacts-dir "${TEST_ADVERSARIAL_DIR}" --allow-dev-keys 2>/dev/null; then
+  echo "Error: Verification should have failed on symlink artifact!"
+  rm -rf "${TEST_ADVERSARIAL_DIR}"
+  exit 1
+fi
+echo "  ✓ Symlink artifact injection rejected"
+
+# 6c. Unlisted executable attack must fail verification
+rm -rf "${TEST_ADVERSARIAL_DIR}"
+TEST_ADVERSARIAL_DIR="$(mktemp -d /tmp/cyravell-rel-adv-XXXXXX)"
+cp -r "${ROOT_DIR}/dist/release-v0.1.0"/* "${TEST_ADVERSARIAL_DIR}/"
+echo "#!/bin/bash" > "${TEST_ADVERSARIAL_DIR}/backdoor.sh"
+if python3 "${ROOT_DIR}/scripts/standalone_verify.py" --manifest "${TEST_ADVERSARIAL_DIR}/release_manifest.json" --artifacts-dir "${TEST_ADVERSARIAL_DIR}" --allow-dev-keys 2>/dev/null; then
+  echo "Error: Verification should have failed on unlisted executable in release directory!"
+  rm -rf "${TEST_ADVERSARIAL_DIR}"
+  exit 1
+fi
+rm -rf "${TEST_ADVERSARIAL_DIR}"
+echo "  ✓ Unlisted executable script in release directory rejected"
 
 echo ""
 echo "══════════════════════════════════════════════════════════════"
